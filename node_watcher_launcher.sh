@@ -21,8 +21,8 @@ export NODE_WATCHER_TOKEN
 
 
 
-# this starts backup loop, then detaches it and exits the shell
-# you can find it via `ps aux | grep backup_loop`
+# this starts node_watcher.py, then detaches it and exits the shell
+# you can find it via `ps aux | grep node_watcher`
 nohup python3 node_watcher.py >/dev/null 2>&1 &
 
 echo "OK"
