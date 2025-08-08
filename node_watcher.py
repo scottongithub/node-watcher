@@ -56,24 +56,30 @@ if environment == "prod":
 	application_log = setup_logger('application_log', './node_watcher.log') # application-level logs
 	node_changes_log = setup_logger('node_changes_log', './node_changes.log') # OSPF-level logs
 	node_watcher_db 	= "./node-watcher.db"
-	alert_threshold_ms 	= 300000 # how long a node is observed to be down before it goes into alerting state
-	error_sleep_time_s 	= 10 # how long the main loop waits to run again if there's an error
-	hub_watcher_mode 	= True # tries to guess when a hub's gone down and hilarity ensues
-	hub_down_threshold  = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
-	# time machine - good for replaying interesting events
-	time_rollback_s = 0
+	alert_time_threshold_ms 	= 300000 # how long a node is observed to be down before it goes into alerting state
+	hub_down_alert_time_ms 		= 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
+	error_sleep_time_s 			= 10 # how long the main loop waits to run again if there's an error
+	hub_watcher_mode 			= True # tries to guess when a hub's gone down and hilarity ensues
+	hub_down_node_qty  			= 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
+	hub_down_raise_qty 			= 25 # how many nodes need to go down at once for the alert to get raised into other systems e.g. send alerts to other channels
+	hub_down_report_interval_ms = 180000 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
+	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
+	time_rollback_s 			= 0 # time machine - good for replaying interesting events
 
 
 if environment == "dev":
 	application_log = setup_logger('application_log', './node_watcher_dev.log') # application-level logs
 	node_changes_log = setup_logger('node_changes_log', './node_changes_dev.log') # OSPF-level logs
 	node_watcher_db 	= "./node-watcher-dev.db"
-	alert_threshold_ms 	= 300000 # how long a node is observed to be down before it goes into alerting state
-	error_sleep_time_s 	= 60 # how long the main loop waits to run again if there's an error 
-	hub_watcher_mode 	= True # tries to guess when a hub's gone down and hilarity ensues
-	hub_down_threshold  = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
-	# time machine - good for replaying interesting events
-	time_rollback_s = 0
+	alert_time_threshold_ms 	= 300000 # how long a node is observed to be down before it goes into alerting state
+	hub_down_alert_time_ms 		= 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
+	error_sleep_time_s 			= 60 # how long the main loop waits to run again if there's an error 
+	hub_watcher_mode 			= True # tries to guess when a hub's gone down and hilarity ensues
+	hub_down_node_qty  			= 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
+	hub_down_raise_qty 			= 25 # how many nodes need to go down at once for the alert to get raised into other systems e.g. send alerts to other channels
+	hub_down_report_interval_ms = 180000 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
+	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
+	time_rollback_s 			= 114388 # time machine - good for replaying interesting events
 
 
 
@@ -348,7 +354,7 @@ def get_subscribed_users( router_id ):
 
 
 def get_downtime_humanized( router_id ):
-	alert_threshold_m = round(alert_threshold_ms / 60000) 
+	alert_threshold_m = round(alert_time_threshold_ms / 60000) 
 	down_time_m = int(((current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"])) / 60000)
 	# doing this to make things look cleaner from rounding
 	if down_time_m in [alert_threshold_m - 1, alert_threshold_m, alert_threshold_m + 1]:
@@ -391,26 +397,33 @@ def most_frequent_and_closest( node_list ):
 
 def get_closest_common_upstream( node_list, before_outage_timestamp ):
 	outage_exit_nodes = []
+	timeout_s = time.time() + root_cause_guesser_timeout_s
 	for router_id in node_list:
-		Node_Explorer_URI = Node_Explorer_API_prefix + "neighbors/" + router_id
-		params = {}
-		params["searchDistance"] = "0"
-		params["includeEgress"] = "true"
-		params["timestamp"] = str(before_outage_timestamp)
-		application_log.info(Node_Explorer_URI)
-		application_log.info(str(params))
-		response = requests.get(Node_Explorer_URI, params=params)
-		json_data = response.json()
+		if time.time() > timeout_s:
+			application_log.error(f"Node Explorer requests have timed out after {root_cause_guesser_timeout_s} seconds")
+			raise Exception("request timeout")
+		try:
+			Node_Explorer_URI = Node_Explorer_API_prefix + "neighbors/" + router_id
+			params = {}
+			params["searchDistance"] = "0"
+			params["includeEgress"] = "true"
+			params["timestamp"] = str(before_outage_timestamp)
+			application_log.info(Node_Explorer_URI)
+			application_log.info(str(params))
+			response = requests.get(Node_Explorer_URI, params=params)
+			json_data = response.json()
 
-		for node in json_data["nodes"]:			
-			if node["id"] == router_id:
-				exit_path_nodes = node["exit_paths"]["outbound"]
+			for node in json_data["nodes"]:			
+				if node["id"] == router_id:
+					exit_path_nodes = node["exit_paths"]["outbound"]
 
-				for exit_path_node in exit_path_nodes:
-					outage_exit_nodes.append(exit_path_node[0])
+					for exit_path_node in exit_path_nodes:
+						outage_exit_nodes.append(exit_path_node[0])
 
-				application_log.info("node: {} exit path: {}".format(router_id, str(exit_path_nodes)))
-				
+					application_log.info("node: {} exit path: {}".format(router_id, str(exit_path_nodes)))
+
+		except Exception as e:
+			application_log.error(f"Error with {router_id}: {e}")
 
 	return( most_frequent_and_closest( outage_exit_nodes ))
 
@@ -594,7 +607,7 @@ while True:
 				if ok_to_monitor( router_id ):
 					unsuppressed_qty += 1
 
-			if hub_watcher_mode and unsuppressed_qty >= hub_down_threshold:
+			if hub_watcher_mode and unsuppressed_qty >= hub_down_node_qty:
 				for router_id in recently_removed_nodes:
 					if ok_to_monitor( router_id ):
 						removed_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : False, "hub_down_group": current_timestamp_ms}
@@ -610,7 +623,7 @@ while True:
 			hub_down_nodes = []
 			for router_id in removed_nodes_tracker:	
 
-				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > alert_threshold_ms \
+				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > alert_time_threshold_ms \
 				and removed_nodes_tracker[router_id]["alerting"] == False \
 				and is_silenced( router_id ) == False \
 				and "hub_down_group" not in removed_nodes_tracker[router_id]:
@@ -691,7 +704,7 @@ while True:
 					# print(response)
 
 
-				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > alert_threshold_ms \
+				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > hub_down_alert_time_ms \
 				and removed_nodes_tracker[router_id]["alerting"] == False \
 				and is_silenced( router_id ) == False \
 				and "hub_down_group" in removed_nodes_tracker[router_id]:
@@ -700,23 +713,28 @@ while True:
 
 			application_log.info( "hub_down_nodes" )
 			application_log.info( hub_down_nodes )			
-			if hub_down_nodes and len(hub_down_nodes) >= hub_down_threshold: # need to do this check again in case any nodes have come back up
+			if hub_down_nodes and len(hub_down_nodes) >= hub_down_node_qty: # need to do this check again in case any nodes have come back up
 				hub_down_group = removed_nodes_tracker[hub_down_nodes[0]]["timestamp"]
 				hub_down_tracker[hub_down_group] = {"alerting" : False}
+
 
 				a_minute_before_outage = round(hub_down_group / 1000) - 60
 				two_min_before_outage = round(hub_down_group / 1000) - 120
 				try:
-					suspected_problem_node = get_closest_common_upstream( hub_down_nodes, two_min_before_outage )
+					# a subset of nodes is used to speed up the calculation; the distribution in the list should be random enough
+					suspected_problem_node = get_closest_common_upstream( hub_down_nodes[:10], two_min_before_outage )
 				except Exception as e:
 					application_log.error('Error', exc_info=e)
 					suspected_problem_node = "not sure lol"
+
 				body = ""
 				for i in range( round(len(hub_down_nodes)/ 5)):
 					body += ":fire:"
-				body += (" *" + str(len(hub_down_nodes)) + "* nodes down at once, looking like a hub went down " + get_downtime_humanized( hub_down_nodes[0]) + " ago.")
-				body += (" Suspected root cause node: *" + suspected_problem_node)
-				body += ("* Details and tracking in this here thread :thread:")
+				body += (" *" + str(len(hub_down_nodes)) + "* nodes down at once, looking like a hub went down " + get_downtime_humanized( hub_down_nodes[0]) + " ago. ")
+				body += ("Suspected root cause node: *" + suspected_problem_node + "*. ")
+				body += ("Details and tracking in this here thread :thread:")
+				if len(hub_down_nodes) > hub_down_raise_qty:
+					body += " <!channel>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
 																									"channel": channel}))
 				json_data = response.json()
@@ -742,12 +760,27 @@ while True:
 																									"channel": channel , \
 																									"thread_ts": thread_ts, \
 																									"unfurl_links": False}))
-
 				hub_down_tracker[hub_down_group]["alerting"] = True
 
+				# a_minute_before_outage = round(hub_down_group / 1000) - 60
+				# two_min_before_outage = round(hub_down_group / 1000) - 120
+				# try:
+				# 	suspected_problem_node = get_closest_common_upstream( hub_down_nodes, two_min_before_outage )
+				# except Exception as e:
+				# 	application_log.error('Error', exc_info=e)
+				# 	suspected_problem_node = "not sure lol"
 
-			if hub_down_nodes and len(hub_down_nodes) < hub_down_threshold:
-				# don't make a hub event - just remove the hub down group and they'll alert as independant nodes
+				# body = (" Suspected root cause node: *" + suspected_problem_node + "*")
+				# response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
+				# 																	"channel": channel , \
+				# 																	"thread_ts": thread_ts}))
+
+
+
+
+			if hub_down_nodes and len(hub_down_nodes) < hub_down_node_qty:
+				# in the case that a hub-down event was triggered, but some nodes have come up before time and qty threshhold
+				# then don't make a hub event - just remove the hub down group and they'll alert as independant nodes
 				for router_id in hub_down_nodes:
 					del removed_nodes_tracker[router_id]["hub_down_group"]
 
