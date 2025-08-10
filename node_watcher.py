@@ -6,22 +6,22 @@ from time import sleep
 
 # Node-Watcher is launched from node_watcher_launcher.sh, which provides the following environent variables
 try:
-  environment = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
-  channel = os.environ['SLACK_CHANNEL']
-  token = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
+  environment       = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
+  channel           = os.environ['SLACK_CHANNEL']
+  token             = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
   thread_URI_prefix = os.environ['SLACK_THREAD_URI_PREFIX']
+  BIRD_API_prefix   = os.environ['BIRD_API_PREFIX']
   Node_Explorer_API_prefix = os.environ['NODE_EXPORER_API_PREFIX']
-  BIRD_API_prefix = os.environ['BIRD_API_PREFIX']
 except Exception as error:
   print("problem with importing an environment variable, make sure you run this from node_watcher_launcher.sh or node_node_watcher_launcher_dev.sh", error)
   exit(1)
 
 
-delete_message_URI 	= "https://slack.com/api/chat.delete"
-get_reactions_URI 	= "https://slack.com/api/reactions.get"
-post_message_URI  	= "https://slack.com/api/chat.postMessage"
-node_map_prefix		= "https://www.nycmesh.net/map/nodes/"
-http_headers 		= {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
+delete_message_URI  = "https://slack.com/api/chat.delete"
+get_reactions_URI   = "https://slack.com/api/reactions.get"
+post_message_URI    = "https://slack.com/api/chat.postMessage"
+node_map_prefix     = "https://www.nycmesh.net/map/nodes/"
+http_headers        = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
 
 
 
@@ -53,33 +53,34 @@ def setup_logger(name, log_file, level=logging.INFO):
 
 
 if environment == "prod":
-	application_log = setup_logger('application_log', './node_watcher.log') # application-level logs
-	node_changes_log = setup_logger('node_changes_log', './node_changes.log') # OSPF-level logs
+	application_log   = setup_logger('application_log', './node_watcher.log') # application-level logs
+	node_changes_log  = setup_logger('node_changes_log', './node_changes.log') # OSPF-level logs
 	node_watcher_db 	= "./node-watcher.db"
-	alert_time_threshold_ms 	= 300000 # how long a node is observed to be down before it goes into alerting state
-	hub_down_alert_time_ms 		= 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
-	error_sleep_time_s 			= 10 # how long the main loop waits to run again if there's an error
-	hub_watcher_mode 			= True # tries to guess when a hub's gone down and hilarity ensues
-	hub_down_node_qty  			= 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
-	hub_down_raise_qty 			= 25 # how many nodes need to go down at once for the alert to get raised into other systems e.g. send alerts to other channels
-	hub_down_report_interval_ms = 180000 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
+	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
+	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
+	error_sleep_time_s           = 10 # how long the main loop waits to run again if there's an error
+	hub_watcher_mode             = True # can be disabled for troubleshooting
+	hub_down_node_qty            = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
+	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
+	hub_down_report_interval_s   = 180 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	time_rollback_s 			= 0 # time machine - good for replaying interesting events
+	time_rollback_s              = 0 # time machine - good for replaying interesting events
 
 
 if environment == "dev":
-	application_log = setup_logger('application_log', './node_watcher_dev.log') # application-level logs
-	node_changes_log = setup_logger('node_changes_log', './node_changes_dev.log') # OSPF-level logs
+	# logging.basicConfig(filename='node_watcher_dev.log', filemode='w')
+	application_log   = setup_logger('application_log', './node_watcher_dev.log') # application-level logs
+	node_changes_log  = setup_logger('node_changes_log', './node_changes_dev.log') # OSPF-level logs
 	node_watcher_db 	= "./node-watcher-dev.db"
-	alert_time_threshold_ms 	= 300000 # how long a node is observed to be down before it goes into alerting state
-	hub_down_alert_time_ms 		= 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
-	error_sleep_time_s 			= 60 # how long the main loop waits to run again if there's an error 
-	hub_watcher_mode 			= True # tries to guess when a hub's gone down and hilarity ensues
-	hub_down_node_qty  			= 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
-	hub_down_raise_qty 			= 25 # how many nodes need to go down at once for the alert to get raised into other systems e.g. send alerts to other channels
-	hub_down_report_interval_ms = 180000 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
+	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
+	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
+	error_sleep_time_s           = 60 # how long the main loop waits to run again if there's an error 
+	hub_watcher_mode             = True # can be disabled for troubleshooting
+	hub_down_node_qty            = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
+	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
+	hub_down_report_interval_s   = 180 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	time_rollback_s 			= 114388 # time machine - good for replaying interesting events
+	time_rollback_s              = 0 # time machine - good for replaying interesting events
 
 
 
@@ -762,20 +763,6 @@ while True:
 																									"unfurl_links": False}))
 				hub_down_tracker[hub_down_group]["alerting"] = True
 
-				# a_minute_before_outage = round(hub_down_group / 1000) - 60
-				# two_min_before_outage = round(hub_down_group / 1000) - 120
-				# try:
-				# 	suspected_problem_node = get_closest_common_upstream( hub_down_nodes, two_min_before_outage )
-				# except Exception as e:
-				# 	application_log.error('Error', exc_info=e)
-				# 	suspected_problem_node = "not sure lol"
-
-				# body = (" Suspected root cause node: *" + suspected_problem_node + "*")
-				# response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-				# 																	"channel": channel , \
-				# 																	"thread_ts": thread_ts}))
-
-
 
 
 			if hub_down_nodes and len(hub_down_nodes) < hub_down_node_qty:
@@ -783,6 +770,28 @@ while True:
 				# then don't make a hub event - just remove the hub down group and they'll alert as independant nodes
 				for router_id in hub_down_nodes:
 					del removed_nodes_tracker[router_id]["hub_down_group"]
+
+			if hub_down_tracker:
+				for hub_down_group in hub_down_tracker: # in case many hub-down events occur at once <:-O
+					if hub_down_tracker[hub_down_group]["alerting"] == True and \
+					int(((current_timestamp_ms / 1000) % hub_down_report_interval_s) / 60) == 0:
+						query = 'SELECT * FROM slack_threads WHERE node_ip = ?' # TODO rename this node_ip column, or move this data to another table
+						row = db_conn.execute(query, (hub_down_group,))
+						row = row.fetchall()
+						thread_ts = row[0][1]
+						response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, "timestamp": thread_ts})
+						json_data = response.json()
+						if "reactions" in json_data["message"]:
+							for reaction in json_data["message"]["reactions"]:
+							# eyes 'turns on' reporting
+								if reaction["name"] == "eyes":
+									down_hub_nodes = []
+									for down_hub_node in (router_id for router_id in removed_nodes_tracker if "hub_down_group" in removed_nodes_tracker[router_id] and \
+									removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group):
+										down_hub_nodes.append(down_hub_node)
+									body = (":cry: Nodes that are still down from this hub outage " + str(down_hub_nodes))
+									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
 
 				print(router_id, removed_nodes_tracker[router_id], current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] )
 				down_hours = (current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"]) / 3600000
