@@ -36,7 +36,7 @@ suppress_duration_STOPWATCH_s = 10800
 
 # what hour/min the daily report goes out, 24h format, local time
 reporting_hour = 9
-reporting_minute = 0
+reporting_minute = 1
 
 # how long before a down node is considered abandoned, and so removed from alerting and reporting
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
@@ -78,7 +78,7 @@ if environment == "dev":
 	hub_watcher_mode             = True # can be disabled for troubleshooting
 	hub_down_node_qty            = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
 	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
-	hub_down_report_interval_s   = 180 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
+	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
 	time_rollback_s              = 0 # time machine - good for replaying interesting events
 
@@ -442,6 +442,16 @@ def get_hub_down_group_members( hub_down_group ):
 	return( hub_down_group_members )
 
 
+def get_node_webmap_URI( nodes_to_be_mapped ):
+	node_map_URI = node_map_prefix
+	for node in nodes_to_be_mapped:
+		if node != nodes_to_be_mapped[-1]:
+			node_map_URI += str(node) + "-"
+		else:
+			node_map_URI += str(node)
+	return(node_map_URI)
+
+
 
 #####################
 ####  MAIN LOOP  ####
@@ -503,6 +513,13 @@ while True:
 
 		if recently_added_nodes:			
 			node_changes_log.info( str( current_timestamp_ms ) + " Added: " + str( recently_added_nodes ) + "\n")
+			
+			# In case many nodes in a hub-down event come back up right away,
+			# they should all be sent out one request, otherwise there may be 
+			# rate-limiting issues. hub_down_added_nodes tracks that info across `for` loops
+			# structure: {<hub down group ID_1>:[list-of-returned-nodes], <hub down group ID_2>:[list-of-returned-nodes]}
+			hub_down_added_nodes = {} 
+
 			for router_id in recently_added_nodes:
 
 				if router_id in removed_nodes_tracker and removed_nodes_tracker[router_id]["alerting"] == False:
@@ -579,22 +596,49 @@ while True:
 				elif router_id in removed_nodes_tracker and removed_nodes_tracker[router_id]["alerting"] == True \
 				and is_silenced( router_id ) == False \
 				and "hub_down_group" in removed_nodes_tracker[router_id]:
-					query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
-					row = db_conn.execute(query, (removed_nodes_tracker[router_id]["hub_down_group"],))
+
+					hub_down_group = removed_nodes_tracker[router_id]["hub_down_group"]
+					if not hub_down_group in hub_down_added_nodes:
+						hub_down_added_nodes[hub_down_group] = []
+
+					hub_down_added_nodes[hub_down_group].append(router_id)
+					# removed_nodes_tracker.pop(router_id)
+
+
+
+
+			if hub_down_added_nodes:
+
+				application_log.info(f"hub_down_added_nodes: {hub_down_added_nodes}")
+
+				for hub_down_group in hub_down_added_nodes:
+
+					query = 'SELECT * FROM slack_threads WHERE node_ip = ?' # TODO rename this node_ip column, or move this data to another table
+					row = db_conn.execute(query, (str(hub_down_group),))
 					row = row.fetchall()
 					thread_ts = row[0][1]
-					body = (":point_up: " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
+					if len(hub_down_added_nodes[hub_down_group]) == 1:
+						body = (":point_up: " + hub_down_added_nodes[hub_down_group][0] + " is up! Downtime " + get_downtime_humanized( hub_down_added_nodes[hub_down_group][0] ) )
+					elif len(hub_down_added_nodes[hub_down_group]) > 1:
+						body = (":point_up: *These nodes are back up. Their downtime is " + get_downtime_humanized( hub_down_added_nodes[hub_down_group][0])) + ":*\n"
+						for router_id in hub_down_added_nodes[hub_down_group]:
+							body += router_id + "  "
 					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
 																										"channel": channel , \
 																										"thread_ts": thread_ts}))
-					hub_down_group = removed_nodes_tracker[router_id]["hub_down_group"]
-					removed_nodes_tracker.pop(router_id)
+
+					for router_id in hub_down_added_nodes[hub_down_group]:
+						removed_nodes_tracker.pop(router_id)
+
 					if not get_hub_down_group_members( hub_down_group ):
-						body = (":sunglasses: all nodes are up" )
+						body = (":sunglasses: all nodes are up <!channel>" )
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																											"channel": channel , \
-																											"thread_ts": thread_ts}))
+																										"channel": channel , \
+																										"thread_ts": thread_ts}))
 						hub_down_tracker.pop(hub_down_group)
+
+
+
 
 
 
@@ -734,7 +778,7 @@ while True:
 				body += (" *" + str(len(hub_down_nodes)) + "* nodes down at once, looking like a hub went down " + get_downtime_humanized( hub_down_nodes[0]) + " ago. ")
 				body += ("Suspected root cause node: *" + suspected_problem_node + "*. ")
 				body += ("Details and tracking in this here thread :thread:")
-				if len(hub_down_nodes) > hub_down_raise_qty:
+				if len(hub_down_nodes) >= hub_down_raise_qty:
 					body += " <!channel>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
 																									"channel": channel}))
@@ -745,18 +789,18 @@ while True:
 
 				node_map_URI = node_map_prefix
 				nodes_to_be_mapped = []
-				body = "Nodes that are down from this hub outage: "
+				body = "*Nodes that are down from this hub outage:*\n"
 				for router_id in hub_down_nodes:
-					body += "\n" + router_id
+					body += router_id + "  "
 					nodes_to_be_mapped.append(IP_to_NN( router_id ))
 					removed_nodes_tracker[router_id]["alerting"] = True
 
-				for node in nodes_to_be_mapped:
-					if node != nodes_to_be_mapped[-1]:
-						node_map_URI += str(node) + "-"
-					else:
-						node_map_URI += str(node)
-				body += "\n <" + node_map_URI + "|map of down nodes in this outage>"
+				# for node in nodes_to_be_mapped:
+				# 	if node != nodes_to_be_mapped[-1]:
+				# 		node_map_URI += str(node) + "-"
+				# 	else:
+				# 		node_map_URI += str(node)
+				body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes in this outage>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
 																									"channel": channel , \
 																									"thread_ts": thread_ts, \
@@ -776,7 +820,7 @@ while True:
 					if hub_down_tracker[hub_down_group]["alerting"] == True and \
 					int(((current_timestamp_ms / 1000) % hub_down_report_interval_s) / 60) == 0:
 						query = 'SELECT * FROM slack_threads WHERE node_ip = ?' # TODO rename this node_ip column, or move this data to another table
-						row = db_conn.execute(query, (hub_down_group,))
+						row = db_conn.execute(query, (str(hub_down_group),))
 						row = row.fetchall()
 						thread_ts = row[0][1]
 						response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, "timestamp": thread_ts})
@@ -785,12 +829,17 @@ while True:
 							for reaction in json_data["message"]["reactions"]:
 							# eyes 'turns on' reporting
 								if reaction["name"] == "eyes":
-									down_hub_nodes = []
-									for down_hub_node in (router_id for router_id in removed_nodes_tracker if "hub_down_group" in removed_nodes_tracker[router_id] and \
-									removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group):
-										down_hub_nodes.append(down_hub_node)
-									body = (":cry: Nodes that are still down from this hub outage " + str(down_hub_nodes))
-									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+									# down_hub_nodes = []
+									# for down_hub_node in (router_id for router_id in removed_nodes_tracker if "hub_down_group" in removed_nodes_tracker[router_id] and \
+									# removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group):
+									# 	down_hub_nodes.append(down_hub_node)
+									body = (":cry: *Nodes that are still down from this hub outage (enabled by leaving :eyes: reaction on parent):*\n")
+									nodes_to_be_mapped = []
+									for router_id in get_hub_down_group_members(hub_down_group):
+										body += router_id + " "
+										nodes_to_be_mapped.append(IP_to_NN( router_id ))
+									body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of nodes that are still down in this outage>"
+									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
 				print(router_id, removed_nodes_tracker[router_id], current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] )
@@ -846,12 +895,12 @@ while True:
 					for router_id in removed_nodes_tracker:
 						if not is_silenced( router_id ):
 							nodes_to_be_mapped.append(IP_to_NN( router_id ))
-					node_map_URI = node_map_prefix
-					for node in nodes_to_be_mapped:
-						if node != nodes_to_be_mapped[-1]:
-							node_map_URI += str(node) + "-"
-						else:
-							node_map_URI += str(node)
+					# node_map_URI = node_map_prefix
+					# for node in nodes_to_be_mapped:
+					# 	if node != nodes_to_be_mapped[-1]:
+					# 		node_map_URI += str(node) + "-"
+					# 	else:
+					# 		node_map_URI += str(node)
 
 					nodes_to_be_mapped = list(set(nodes_to_be_mapped))
 
@@ -870,7 +919,7 @@ while True:
 						removed_nodes_tracker.pop( router_id )
 				down_report += "```"
 				if nodes_to_be_mapped:
-					down_report += "\n <" + node_map_URI + "|map of down nodes>"
+					down_report += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, \
 																									"channel": channel , \
 																									"thread_ts": thread_ts, \

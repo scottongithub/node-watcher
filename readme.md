@@ -68,7 +68,7 @@ Number of fire emojis is the number of down nodes/5 (rounded) so the above examp
 <img src="docs/pics/hub_down.png" />
 </p>
 
-While waiting for all nodes in a degraded hub to come back up, it may be useful to see a report of which nodes have not yet come back up. Place a :eyes: on the parent message of the hub-down thread and a report of still-down nodes will be posted to the thread every 3 minutes.
+While waiting for all nodes in a degraded hub to come back up, it may be useful to see a report of which nodes have not yet come back up. Place a :eyes: on the parent message of the hub-down thread and a report of still-down nodes will be posted to the thread every minute. Remove the :eyes: to stop the reporting.
 
 ## Daily Report
 
