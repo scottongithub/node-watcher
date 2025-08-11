@@ -47,7 +47,7 @@ In addition to this node's history thread above, an additional message is added 
 This additional message, in the main channel as opposed to inside the node's history thread, will be deleted when that node's state changes again, and the new message will replace it. This is done to minimize the amount of noise that a flappy node can produce. A node's *full* history is available by looking at the node's history thread, viewable by clicking the 'node history' link in the alert message
 
 ## Controlling the App with Reactions
-Certain functionalities can be invoked by leaving reactions on the beginning of a node's thread message, or the alert messages in the channel (but not messages *inside* the node's history thread).
+Certain functionalities can be invoked by leaving reactions on the parent of a node's history thread, or on the node's alert message in the channel (but not messages *inside* the node's history thread).
 
 :eyes: -> the user that left this will be @'ed on (only) the next alert message from this node  
 :heart: -> the user that left this will be subscribed to all future alerts from this node  

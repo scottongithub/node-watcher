@@ -36,7 +36,7 @@ suppress_duration_STOPWATCH_s = 10800
 
 # what hour/min the daily report goes out, 24h format, local time
 reporting_hour = 9
-reporting_minute = 1
+reporting_minute = 0
 
 # how long before a down node is considered abandoned, and so removed from alerting and reporting
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
@@ -62,7 +62,7 @@ if environment == "prod":
 	hub_watcher_mode             = True # can be disabled for troubleshooting
 	hub_down_node_qty            = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
 	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
-	hub_down_report_interval_s   = 180 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
+	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
 	time_rollback_s              = 0 # time machine - good for replaying interesting events
 
