@@ -80,7 +80,7 @@ if environment == "dev":
 	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
 	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	time_rollback_s              = 0 # time machine - good for replaying interesting events
+	time_rollback_s              = 64362 # time machine - good for replaying interesting events
 
 
 
@@ -781,7 +781,7 @@ while True:
 
 				body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes in this outage>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
-				hub_down_tracker[hub_down_group]["alerting"] = True
+				hub_down_tracker.update({hub_down_group: {"alerting" : True}})
 
 
 			if hub_down_nodes and len(hub_down_nodes) < hub_down_node_qty:
