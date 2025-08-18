@@ -36,7 +36,7 @@ suppress_duration_STOPWATCH_s = 10800
 
 # what hour/min the daily report goes out, 24h format, local time
 reporting_hour = 9
-reporting_minute = 0
+reporting_minute = 1
 
 # how long before a down node is considered abandoned, and so removed from alerting and reporting
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
@@ -81,6 +81,21 @@ if environment == "dev":
 	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
 	time_rollback_s              = 0 # time machine - good for replaying interesting events
+
+
+
+############################
+####   HOLIDAY THEMES   ####
+############################
+
+
+# # No holidays, BAU
+# node_up_emoji = ":point_up:"
+# node_down_emoji = ":point_down:"
+
+# Halloween
+node_up_emoji = ":jack_o_lantern:"
+node_down_emoji = ":female_zombie:"
 
 
 
@@ -151,8 +166,7 @@ def is_silenced( router_id ):
 		row = row.fetchall()
 		thread_ts = row[0][1]
 
-		response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, \
-																					"timestamp": thread_ts})
+		response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, "timestamp": thread_ts})
 		json_data = response.json()
 
 		if "reactions" in json_data["message"]:
@@ -182,8 +196,7 @@ def is_silenced( router_id ):
 		row = db_conn.execute(query, ( router_id,))
 		row = row.fetchall()
 		message_ts = row[0][1]
-		response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, \
-																					"timestamp": message_ts})
+		response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, "timestamp": message_ts})
 		json_data = response.json()
 
 		if "reactions" in json_data["message"]:
@@ -196,7 +209,7 @@ def is_silenced( router_id ):
 			if any(reaction in reactions for reaction in ["date", "stopwatch"]):
 				now_s = time.time()
 			if "date" in reactions:
-				print(round(now_s) - round(float(message_ts)), suppress_duration_DATE_s)
+				# print(round(now_s) - round(float(message_ts)), suppress_duration_DATE_s)
 				if round(now_s) - round(float(message_ts)) < suppress_duration_DATE_s:
 					return True
 			if "stopwatch" in reactions:
@@ -216,8 +229,7 @@ def get_subscribed_users( router_id ):
 	row = db_conn.execute(query, (router_id, ))
 	row = row.fetchall()
 	thread_ts = row[0][1]
-	response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, \
-																				"timestamp": thread_ts})
+	response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, "timestamp": thread_ts})
 	json_data = response.json()
 
 	if "reactions" in json_data["message"]:
@@ -280,9 +292,7 @@ def get_subscribed_users( router_id ):
 		row = db_conn.execute(query, (router_id,))
 		row = row.fetchall()
 		message_ts = row[0][1]
-		response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, \
-																					"timestamp": message_ts})
-	
+		response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, "timestamp": message_ts})
 		json_data = response.json()
 
 		if "reactions" in json_data["message"]:
@@ -357,7 +367,7 @@ def get_subscribed_users( router_id ):
 def get_downtime_humanized( router_id ):
 	alert_threshold_m = round(alert_time_threshold_ms / 60000) 
 	down_time_m = int(((current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"])) / 60000)
-	# doing this to make things look cleaner from rounding
+	# doing this to make things look cleaner from rounding, at the cost of a bit of accuracy
 	if down_time_m in [alert_threshold_m - 1, alert_threshold_m, alert_threshold_m + 1]:
 		downtime_humanized = str(alert_threshold_m) + " min"
 		return ( downtime_humanized )
@@ -499,8 +509,6 @@ while True:
 
 		recently_added_nodes = list(set(current_nodes) - set(previous_nodes))
 		recently_removed_nodes = list(set(previous_nodes) - set(current_nodes))
-		print( two_minutes_ago_snapshot_URI, "\n", a_minute_ago_snapshot_URI  )
-		print( recently_added_nodes, recently_removed_nodes )
 
 
 
@@ -511,12 +519,13 @@ while True:
 
 		current_timestamp_ms = int( time.time() * 1000 ) - int( time_rollback_s * 1000 )
 
-		if recently_added_nodes:			
-			node_changes_log.info( str( current_timestamp_ms ) + " Added: " + str( recently_added_nodes ) + "\n")
+		if recently_added_nodes:
+
+			node_changes_log.info(f"{current_timestamp_ms} Added: {recently_added_nodes}\n")
 			
 			# In case many nodes in a hub-down event come back up right away,
 			# they should all be sent out one request, otherwise there may be 
-			# rate-limiting issues. hub_down_added_nodes tracks that info across `for` loops
+			# rate-limiting issues. `hub_down_added_nodes` tracks that info across for-loops
 			# structure: {<hub down group ID_1>:[list-of-returned-nodes], <hub down group ID_2>:[list-of-returned-nodes]}
 			hub_down_added_nodes = {} 
 
@@ -529,13 +538,11 @@ while True:
 				and is_silenced( router_id ) == False \
 				and "hub_down_group" not in removed_nodes_tracker[router_id]:
 
-					print( get_downtime_humanized( router_id ) + "\n" )
-					application_log.info("downtime: %s", get_downtime_humanized( router_id ))
+					application_log.info(f"{router_id} downtime: {get_downtime_humanized( router_id )}")
 
 					# Get reactions and update subscribed users, before the previous alert message is deleted
 					subscribed_users = get_subscribed_users( router_id )
-					application_log.info( "subscribed users: " )
-					application_log.info( str(subscribed_users) )
+					application_log.info(f"subscribed users: {str(subscribed_users)}" )
 
 					# Delete previous alert message in channel, if exists
 					query = ('SELECT EXISTS(SELECT * FROM alert_messages WHERE node_ip = ?)')
@@ -552,33 +559,27 @@ while True:
 
 					# Post message to the node's existing thread
 					# No need to check if thread exists because it is coming out of alerting
-					query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
-					row = db_conn.execute(query, (router_id,))
-					row = row.fetchall()
+					query     = 'SELECT * FROM slack_threads WHERE node_ip = ?'
+					row       = db_conn.execute(query, (router_id,))
+					row       = row.fetchall()
 					thread_ts = row[0][1]
-					body = (":point_up: " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
-					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																										"channel": channel , \
-																										"thread_ts": thread_ts}))
+					body      = (":point_up: " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
+					response  = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 					# Get timestamp from the post above - to be added to main thread message as a link
-					json_data = response.json()
-					thread_ts = json_data["message"]["thread_ts"]
-					latest_post_ts = json_data["message"]["ts"]
-					latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + \
-					 					"?thread_ts=" + thread_ts + \
-					 					"&cid=" + channel 
+					json_data       = response.json()
+					thread_ts       = json_data["message"]["thread_ts"]
+					latest_post_ts  = json_data["message"]["ts"]
+					latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
 					# Post alert message to main channel
 					application_log.info( "is silenced: " )
 					application_log.info( str(is_silenced( router_id ) ))
-					body = (":point_up: " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
+					body = (node_up_emoji + " " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
 					body += " <" + latest_post_URI + "|node history>"
 					for user_id in subscribed_users:
 						body += " <@" + user_id + "> "						
-					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																										"channel": channel, \
-																										"unfurl_links": False }))
+					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
 
 					# Get timestamp of main-channel message - to delete it later when new alert goes out
 					json_data = response.json()
@@ -623,18 +624,14 @@ while True:
 						body = (":point_up: *These nodes are back up. Their downtime is " + get_downtime_humanized( hub_down_added_nodes[hub_down_group][0])) + ":*\n"
 						for router_id in hub_down_added_nodes[hub_down_group]:
 							body += router_id + "  "
-					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																										"channel": channel , \
-																										"thread_ts": thread_ts}))
+					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 					for router_id in hub_down_added_nodes[hub_down_group]:
 						removed_nodes_tracker.pop(router_id)
 
 					if not get_hub_down_group_members( hub_down_group ):
-						body = (":sunglasses: all nodes are up <!channel>" )
-						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																										"channel": channel , \
-																										"thread_ts": thread_ts}))
+						body = (":sunglasses: all nodes are up" )
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 						hub_down_tracker.pop(hub_down_group)
 
 
@@ -644,7 +641,7 @@ while True:
 
 		if recently_removed_nodes:
 
-			node_changes_log.info( str( current_timestamp_ms ) + " Removed: " + str( recently_removed_nodes ) + "\n")
+			node_changes_log.info(f"Removed: {str( current_timestamp_ms )} {str( recently_removed_nodes )} \n")
 
 			# Need this to decide if this may be a hub-down event
 			unsuppressed_qty = 0
@@ -680,8 +677,7 @@ while True:
 					if thread_exists[0][0]:						
 						# Get reactions and update subscribed users before the last alert message is deleted
 						subscribed_users = get_subscribed_users( router_id )
-						application_log.info( "subscribed users: " )
-						application_log.info( str( subscribed_users ))
+						application_log.info(f"subscribed users: {str(subscribed_users)}")
 
 						# Delete previous alert message
 						# The last alert message (in the channel) should always exist if the thread exists, but
@@ -706,28 +702,21 @@ while True:
 						row = row.fetchall()
 						thread_ts = row[0][1]
 						body = (":point_down: " + router_id + " has been down " + get_downtime_humanized( router_id ))
-						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																											"channel": channel , \
-																											"thread_ts": thread_ts}))
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 						# Get timestamp from the post above - to be added to main channel message as a link
 						json_data = response.json()
 						thread_ts = json_data["message"]["thread_ts"]
 						latest_post_ts = json_data["message"]["ts"]
-						latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + \
-						 					"?thread_ts=" + thread_ts + \
-						 					"&cid=" + channel 
+						latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
 						# Post message to main channel
-						application_log.info( "is silenced: " )
-						application_log.info( str(is_silenced( router_id ) ))
-						body = (":point_down: " + router_id + " has been down " + get_downtime_humanized( router_id ))
+						application_log.info(f"{router_id} is silenced: {str(is_silenced(router_id))}")
+						body = (node_down_emoji + " " + router_id + " has been down " + get_downtime_humanized( router_id ))
 						body += " <" + latest_post_URI + "|node history>"
 						for user_id in subscribed_users:
 							body += " <@" + user_id + "> "
-						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																											"channel": channel, \
-																											"unfurl_links": False }))
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
 
 						# Get timestamp of main-channel message - to delete it later when a new alert goes out
 						json_data = response.json()
@@ -736,10 +725,8 @@ while True:
 						db_conn.execute(query, (router_id, thread_ts, ))
 
 					else:
-						print("nope need to make thread")
 						body = (":thread: *" + router_id + "* has been down " + get_downtime_humanized( router_id ))
-						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																											"channel": channel}))
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
 						json_data = response.json()
 						thread_ts = json_data["ts"]
 						query = 'INSERT into slack_threads(node_ip, thread_ts) VALUES(?,?)'
@@ -756,12 +743,10 @@ while True:
 					hub_down_nodes.append( router_id ) 
 
 
-			application_log.info( "hub_down_nodes" )
-			application_log.info( hub_down_nodes )			
+
+			application_log.info(f"hub_down_nodes: {hub_down_nodes}")
 			if hub_down_nodes and len(hub_down_nodes) >= hub_down_node_qty: # need to do this check again in case any nodes have come back up
 				hub_down_group = removed_nodes_tracker[hub_down_nodes[0]]["timestamp"]
-				hub_down_tracker[hub_down_group] = {"alerting" : False}
-
 
 				a_minute_before_outage = round(hub_down_group / 1000) - 60
 				two_min_before_outage = round(hub_down_group / 1000) - 120
@@ -780,8 +765,7 @@ while True:
 				body += ("Details and tracking in this here thread :thread:")
 				if len(hub_down_nodes) >= hub_down_raise_qty:
 					body += " <!channel>"
-				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																									"channel": channel}))
+				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
 				json_data = response.json()
 				thread_ts = json_data["ts"]
 				query = 'INSERT into slack_threads(node_ip, thread_ts) VALUES(?,?)'
@@ -795,18 +779,9 @@ while True:
 					nodes_to_be_mapped.append(IP_to_NN( router_id ))
 					removed_nodes_tracker[router_id]["alerting"] = True
 
-				# for node in nodes_to_be_mapped:
-				# 	if node != nodes_to_be_mapped[-1]:
-				# 		node_map_URI += str(node) + "-"
-				# 	else:
-				# 		node_map_URI += str(node)
 				body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes in this outage>"
-				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																									"channel": channel , \
-																									"thread_ts": thread_ts, \
-																									"unfurl_links": False}))
+				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 				hub_down_tracker[hub_down_group]["alerting"] = True
-
 
 
 			if hub_down_nodes and len(hub_down_nodes) < hub_down_node_qty:
@@ -815,10 +790,11 @@ while True:
 				for router_id in hub_down_nodes:
 					del removed_nodes_tracker[router_id]["hub_down_group"]
 
+
 			if hub_down_tracker:
-				for hub_down_group in hub_down_tracker: # in case many hub-down events occur at once <:-O
-					if hub_down_tracker[hub_down_group]["alerting"] == True and \
-					int(((current_timestamp_ms / 1000) % hub_down_report_interval_s) / 60) == 0:
+				application_log.info(f"hub_down_tracker: {hub_down_tracker}")
+				for hub_down_group in hub_down_tracker: # in case many hub-down events occur at once :|
+					if hub_down_tracker[hub_down_group]["alerting"] == True and int(((current_timestamp_ms / 1000) % hub_down_report_interval_s) / 60) == 0:
 						query = 'SELECT * FROM slack_threads WHERE node_ip = ?' # TODO rename this node_ip column, or move this data to another table
 						row = db_conn.execute(query, (str(hub_down_group),))
 						row = row.fetchall()
@@ -829,10 +805,6 @@ while True:
 							for reaction in json_data["message"]["reactions"]:
 							# eyes 'turns on' reporting
 								if reaction["name"] == "eyes":
-									# down_hub_nodes = []
-									# for down_hub_node in (router_id for router_id in removed_nodes_tracker if "hub_down_group" in removed_nodes_tracker[router_id] and \
-									# removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group):
-									# 	down_hub_nodes.append(down_hub_node)
 									body = (":cry: *Nodes that are still down from this hub outage (enabled by leaving :eyes: reaction on parent):*\n")
 									nodes_to_be_mapped = []
 									for router_id in get_hub_down_group_members(hub_down_group):
@@ -842,14 +814,9 @@ while True:
 									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
-				print(router_id, removed_nodes_tracker[router_id], current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] )
-				down_hours = (current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"]) / 3600000
-				down_report = str(router_id) + " has been down for " + get_downtime_humanized( router_id )
-				application_log.info( down_report )
-
-
 		# commit changes to database ;)
 		conn.commit()
+
 
 
 		#######################
@@ -857,7 +824,6 @@ while True:
 		#######################
 
 
-		# if dt.datetime.today().minute == reporting_minute:
 		if dt.datetime.today().hour == reporting_hour and dt.datetime.today().minute == reporting_minute:
 
 			abandoned_nodes = []
@@ -870,39 +836,21 @@ while True:
 					row = row.fetchall()
 					thread_ts = row[0][1]
 					body = (":skull_and_crossbones: " + router_id + " has been down for "  + get_downtime_humanized( router_id ) + " and is now removed from alerting ")
-					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, \
-																										"channel": channel, \
-																										"thread_ts": thread_ts}))
+					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "thread_ts": thread_ts}))
  
-			down_nodes_qty = len( removed_nodes_tracker )
-			abandoned_nodes_qty = len( abandoned_nodes )
-			down_report_summary = ":bar_chart:  Down node report: " + str(down_nodes_qty - abandoned_nodes_qty) + " nodes"
-			if down_nodes_qty == 0:
+			down_report_summary = ":bar_chart:  Down node report: " + str(len(removed_nodes_tracker) - len(abandoned_nodes)) + " nodes"
+			if len( removed_nodes_tracker ) == 0:
 				down_report_summary += " :tada:"
-			response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report_summary, \
-																								"channel": channel}))
+			response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report_summary, "channel": channel}))
 
 
-			if down_nodes_qty > 0:
-
-				nodes_to_map_qty = 0
+			if removed_nodes_tracker:
+				nodes_to_be_mapped = []
 				for router_id in removed_nodes_tracker:
 					if removed_nodes_tracker[router_id]["alerting"] == True and not is_silenced( router_id ):
-						nodes_to_map_qty += 1
+						nodes_to_be_mapped.append( IP_to_NN( router_id ))
 
-				if nodes_to_map_qty > 0:
-					nodes_to_be_mapped = []
-					for router_id in removed_nodes_tracker:
-						if not is_silenced( router_id ):
-							nodes_to_be_mapped.append(IP_to_NN( router_id ))
-					# node_map_URI = node_map_prefix
-					# for node in nodes_to_be_mapped:
-					# 	if node != nodes_to_be_mapped[-1]:
-					# 		node_map_URI += str(node) + "-"
-					# 	else:
-					# 		node_map_URI += str(node)
-
-					nodes_to_be_mapped = list(set(nodes_to_be_mapped))
+					# nodes_to_be_mapped = list(set(nodes_to_be_mapped))
 
 				json_data = response.json()
 				thread_ts = json_data["ts"]
@@ -920,10 +868,7 @@ while True:
 				down_report += "```"
 				if nodes_to_be_mapped:
 					down_report += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes>"
-				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, \
-																									"channel": channel , \
-																									"thread_ts": thread_ts, \
-																									"unfurl_links": False}))
+				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
 		print(removed_nodes_tracker)
