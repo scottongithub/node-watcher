@@ -42,19 +42,20 @@ reporting_minute = 1
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
 
 # gonna split logging up between application and network so let's be fancy about it
-def setup_logger(name, log_file, level=logging.INFO):
+def setup_logger(name, log_file, log_level):
 	formatter = logging.Formatter('%(levelname)s %(message)s')
 	handler = logging.FileHandler(log_file)
 	handler.setFormatter(formatter)
 	logger = logging.getLogger(name)
-	logger.setLevel(level)
+	logger.setLevel(log_level)
 	logger.addHandler(handler)
 	return logger
 
 
 if environment == "prod":
-	application_log   = setup_logger('application_log', './node_watcher.log') # application-level logs
-	node_changes_log  = setup_logger('node_changes_log', './node_changes.log') # OSPF-level logs
+	log_level         = logging.INFO
+	application_log   = setup_logger('application_log', './node_watcher.log', log_level) # application-level logs
+	node_changes_log  = setup_logger('node_changes_log', './node_changes.log', log_level) # OSPF-level logs
 	node_watcher_db 	= "./node-watcher.db"
 	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
 	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
@@ -68,9 +69,9 @@ if environment == "prod":
 
 
 if environment == "dev":
-	# logging.basicConfig(filename='node_watcher_dev.log', filemode='w')
-	application_log   = setup_logger('application_log', './node_watcher_dev.log') # application-level logs
-	node_changes_log  = setup_logger('node_changes_log', './node_changes_dev.log') # OSPF-level logs
+	log_level         = logging.DEBUG
+	application_log   = setup_logger('application_log', './node_watcher_dev.log', log_level) # application-level logs
+	node_changes_log  = setup_logger('node_changes_log', './node_changes_dev.log', log_level) # OSPF-level logs
 	node_watcher_db 	= "./node-watcher-dev.db"
 	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
 	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
@@ -80,7 +81,7 @@ if environment == "dev":
 	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
 	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	time_rollback_s              = 64362 # time machine - good for replaying interesting events
+	time_rollback_s              = 120 # time machine - good for replaying interesting events
 
 
 
@@ -90,12 +91,12 @@ if environment == "dev":
 
 
 # # No holidays, BAU
-# node_up_emoji = ":point_up:"
-# node_down_emoji = ":point_down:"
+node_up_emoji = ":point_up:"
+node_down_emoji = ":point_down:"
 
 # Halloween
-node_up_emoji = ":jack_o_lantern:"
-node_down_emoji = ":female_zombie:"
+# node_up_emoji = ":jack_o_lantern:"
+# node_down_emoji = ":female_zombie:"
 
 
 
@@ -120,6 +121,10 @@ conn.commit()
 # to keep state across app restart, you can copy/paste the last state from node_watcher.log 
 removed_nodes_tracker = {}
 hub_down_tracker = {}
+# this is only used during hub-down events, to prevent _many_ API calls (to get emojis).
+# referencing this list is quick and API-free at the small cost of it only knows about
+# nodes that it has looked up previously (for not hub-down events)
+silenced_nodes_cache = ["10.69.3.32", "10.69.48.1"]
 
 
 
@@ -175,6 +180,8 @@ def is_silenced( router_id ):
 			for reaction in json_data["message"]["reactions"]:
 				reactions.append(reaction["name"])
 			if "x" in reactions:
+				if router_id not in silenced_nodes_cache:
+					silenced_nodes_cache.append(router_id)
 				return True
 			if any(reaction in reactions for reaction in ["date", "calendar", "stopwatch"]):
 				now_s = time.time()
@@ -205,6 +212,8 @@ def is_silenced( router_id ):
 			for reaction in json_data["message"]["reactions"]:
 				reactions.append(reaction["name"])
 			if "x" in reactions:
+				if router_id not in silenced_nodes_cache:
+					silenced_nodes_cache.append(router_id)
 				return True
 			if any(reaction in reactions for reaction in ["date", "stopwatch"]):
 				now_s = time.time()
@@ -216,6 +225,8 @@ def is_silenced( router_id ):
 				if round(now_s) - round(float(message_ts)) < suppress_duration_STOPWATCH_s:
 					return True
 
+	if router_id in silenced_nodes_cache:
+		silenced_nodes_cache.remove(router_id)
 	return False
 
 
@@ -420,7 +431,7 @@ def get_closest_common_upstream( node_list, before_outage_timestamp ):
 			params["includeEgress"] = "true"
 			params["timestamp"] = str(before_outage_timestamp)
 			application_log.info(Node_Explorer_URI)
-			application_log.info(str(params))
+			application_log.debug(f"Node explorer params: {params}")
 			response = requests.get(Node_Explorer_URI, params=params)
 			json_data = response.json()
 
@@ -431,10 +442,10 @@ def get_closest_common_upstream( node_list, before_outage_timestamp ):
 					for exit_path_node in exit_path_nodes:
 						outage_exit_nodes.append(exit_path_node[0])
 
-					application_log.info("node: {} exit path: {}".format(router_id, str(exit_path_nodes)))
+					application_log.debug(f"get_closest_common_upstream: node: {router_id} exit path: {exit_path_nodes}")
 
 		except Exception as e:
-			application_log.error(f"Error with {router_id}: {e}")
+			application_log.error(f"get_closest_common_upstream: Error with {router_id}: {e}")
 
 	return( most_frequent_and_closest( outage_exit_nodes ))
 
@@ -535,8 +546,8 @@ while True:
 					removed_nodes_tracker.pop(router_id)
 
 				elif router_id in removed_nodes_tracker and removed_nodes_tracker[router_id]["alerting"] == True \
-				and is_silenced( router_id ) == False \
-				and "hub_down_group" not in removed_nodes_tracker[router_id]:
+				and "hub_down_group" not in removed_nodes_tracker[router_id] \
+				and is_silenced( router_id ) == False:
 
 					application_log.info(f"{router_id} downtime: {get_downtime_humanized( router_id )}")
 
@@ -573,12 +584,13 @@ while True:
 					latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
 					# Post alert message to main channel
-					application_log.info( "is silenced: " )
-					application_log.info( str(is_silenced( router_id ) ))
+					# application_log.info( "is silenced: " )
+					# application_log.info( str(is_silenced( router_id ) ))
 					body = (node_up_emoji + " " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
 					body += " <" + latest_post_URI + "|node history>"
 					for user_id in subscribed_users:
 						body += " <@" + user_id + "> "						
+					application_log.debug(f"node up body: {body}")			
 					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
 
 					# Get timestamp of main-channel message - to delete it later when new alert goes out
@@ -586,7 +598,6 @@ while True:
 					thread_ts = json_data["ts"]
 					query = 'INSERT into alert_messages(node_ip, thread_ts) VALUES(?,?)'
 					db_conn.execute(query, (router_id, thread_ts, ))
-					application_log.info("body: %s", body)
 					removed_nodes_tracker.pop(router_id)
 
 
@@ -595,8 +606,8 @@ while True:
 					removed_nodes_tracker.pop(router_id)
 
 				elif router_id in removed_nodes_tracker and removed_nodes_tracker[router_id]["alerting"] == True \
-				and is_silenced( router_id ) == False \
-				and "hub_down_group" in removed_nodes_tracker[router_id]:
+				and "hub_down_group" in removed_nodes_tracker[router_id] \
+				and router_id not in silenced_nodes_cache:
 
 					hub_down_group = removed_nodes_tracker[router_id]["hub_down_group"]
 					if not hub_down_group in hub_down_added_nodes:
@@ -646,15 +657,20 @@ while True:
 			# Need this to decide if this may be a hub-down event
 			unsuppressed_qty = 0
 			for router_id in recently_removed_nodes:
-				if ok_to_monitor( router_id ):
-					unsuppressed_qty += 1
+				if router_id not in silenced_nodes_cache:
+					application_log.debug(f"{str(router_id)} not in silenced_nodes_cache")
+				else:
+					application_log.debug(f"{str(router_id)} _IS_ in silenced_nodes_cache")
+				unsuppressed_qty += 1
 
 			if hub_watcher_mode and unsuppressed_qty >= hub_down_node_qty:
 				for router_id in recently_removed_nodes:
-					if ok_to_monitor( router_id ):
+					# Here we check against the cache in case there are _many_ lookups
+					if router_id not in silenced_nodes_cache:
 						removed_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : False, "hub_down_group": current_timestamp_ms}
 			else:
 				for router_id in recently_removed_nodes:
+					# Here we check against slack which is more accurate
 					if ok_to_monitor( router_id ):
 						removed_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : False}
 
@@ -662,13 +678,13 @@ while True:
 
 		if removed_nodes_tracker:
 
-			hub_down_nodes = []
+			hub_down_nodes_current = []
 			for router_id in removed_nodes_tracker:	
 
 				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > alert_time_threshold_ms \
 				and removed_nodes_tracker[router_id]["alerting"] == False \
-				and is_silenced( router_id ) == False \
-				and "hub_down_group" not in removed_nodes_tracker[router_id]:
+				and "hub_down_group" not in removed_nodes_tracker[router_id] \
+				and is_silenced( router_id ) == False:
 					# schema: 'CREATE TABLE IF NOT EXISTS slack_threads(node_ip TEXT, thread_ts TEXT)'
 					query = ('SELECT EXISTS(SELECT * FROM slack_threads WHERE node_ip = ?)')
 					thread_exists = db_conn.execute(query, ( router_id,))
@@ -711,7 +727,7 @@ while True:
 						latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
 						# Post message to main channel
-						application_log.info(f"{router_id} is silenced: {str(is_silenced(router_id))}")
+						# application_log.debug(f"{router_id} is silenced: {str(is_silenced(router_id))}")
 						body = (node_down_emoji + " " + router_id + " has been down " + get_downtime_humanized( router_id ))
 						body += " <" + latest_post_URI + "|node history>"
 						for user_id in subscribed_users:
@@ -738,32 +754,32 @@ while True:
 
 				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > hub_down_alert_time_ms \
 				and removed_nodes_tracker[router_id]["alerting"] == False \
-				and is_silenced( router_id ) == False \
-				and "hub_down_group" in removed_nodes_tracker[router_id]:
-					hub_down_nodes.append( router_id ) 
+				and "hub_down_group" in removed_nodes_tracker[router_id] \
+				and router_id not in silenced_nodes_cache: # Using cache instead of Slack API call in case there are _many_ lookups 
+					hub_down_nodes_current.append( router_id ) 
 
 
 
-			application_log.info(f"hub_down_nodes: {hub_down_nodes}")
-			if hub_down_nodes and len(hub_down_nodes) >= hub_down_node_qty: # need to do this check again in case any nodes have come back up
-				hub_down_group = removed_nodes_tracker[hub_down_nodes[0]]["timestamp"]
+			application_log.info(f"hub_down_nodes_current: {hub_down_nodes_current}")
+			if hub_down_nodes_current and len(hub_down_nodes_current) >= hub_down_node_qty: # need to do this check again in case any nodes have come back up
+				hub_down_group = removed_nodes_tracker[hub_down_nodes_current[0]]["timestamp"]
 
 				a_minute_before_outage = round(hub_down_group / 1000) - 60
 				two_min_before_outage = round(hub_down_group / 1000) - 120
 				try:
 					# a subset of nodes is used to speed up the calculation; the distribution in the list should be random enough
-					suspected_problem_node = get_closest_common_upstream( hub_down_nodes[:10], two_min_before_outage )
+					suspected_problem_node = get_closest_common_upstream( hub_down_nodes_current[:10], two_min_before_outage )
 				except Exception as e:
 					application_log.error('Error', exc_info=e)
 					suspected_problem_node = "not sure lol"
 
 				body = ""
-				for i in range( round(len(hub_down_nodes)/ 5)):
+				for i in range( round(len(hub_down_nodes_current)/ 5)):
 					body += ":fire:"
-				body += (" *" + str(len(hub_down_nodes)) + "* nodes down at once, looking like a hub went down " + get_downtime_humanized( hub_down_nodes[0]) + " ago. ")
+				body += (" *" + str(len(hub_down_nodes_current)) + "* nodes down at once, looking like a hub went down " + get_downtime_humanized( hub_down_nodes_current[0]) + " ago. ")
 				body += ("Suspected root cause node: *" + suspected_problem_node + "*. ")
 				body += ("Details and tracking in this here thread :thread:")
-				if len(hub_down_nodes) >= hub_down_raise_qty:
+				if len(hub_down_nodes_current) >= hub_down_raise_qty:
 					body += " <!channel>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
 				json_data = response.json()
@@ -774,7 +790,7 @@ while True:
 				node_map_URI = node_map_prefix
 				nodes_to_be_mapped = []
 				body = "*Nodes that are down from this hub outage:*\n"
-				for router_id in hub_down_nodes:
+				for router_id in hub_down_nodes_current:
 					body += router_id + "  "
 					nodes_to_be_mapped.append(IP_to_NN( router_id ))
 					removed_nodes_tracker[router_id]["alerting"] = True
@@ -784,10 +800,10 @@ while True:
 				hub_down_tracker.update({hub_down_group: {"alerting" : True}})
 
 
-			if hub_down_nodes and len(hub_down_nodes) < hub_down_node_qty:
+			if hub_down_nodes_current and len(hub_down_nodes_current) < hub_down_node_qty:
 				# in the case that a hub-down event was triggered, but some nodes have come up before time and qty threshhold
 				# then don't make a hub event - just remove the hub down group and they'll alert as independant nodes
-				for router_id in hub_down_nodes:
+				for router_id in hub_down_nodes_current:
 					del removed_nodes_tracker[router_id]["hub_down_group"]
 
 
@@ -874,7 +890,7 @@ while True:
 		print(removed_nodes_tracker)
 		if time_rollback_s != 0:
 			application_log.info(a_minute_ago_snapshot_URI)
-		application_log.info(str(current_timestamp_ms) + " " + str(removed_nodes_tracker) + "\n" + str(hub_down_tracker))
+		application_log.info(f"{current_timestamp_ms}\n{removed_nodes_tracker}\n{hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
 		diff_s = time.time() - start_time_s
 		sleep(60 - diff_s) # this keeps us roughly in-sync with the BIRD server's cron job
 
@@ -882,7 +898,7 @@ while True:
 	except Exception as e:
 		application_log.error('Error', exc_info=e)
 		application_log.info(a_minute_ago_snapshot_URI)
-		application_log.info(str(current_timestamp_ms) + " " + str(removed_nodes_tracker))
+		application_log.info(f"{current_timestamp_ms}\n{removed_nodes_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache}\n")
 		# a potential cause of errors is doing something at the same time that BIRD is, so nudging the time here
 		sleep(error_sleep_time_s)
 		continue
