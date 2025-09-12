@@ -58,7 +58,7 @@ Certain functionalities can be invoked by leaving reactions on the parent of a n
 
 ## Hub-down Events
 
-When 5 or more nodes go down, and stay down, for 3 min, it's considered a hub-down outage and will look like this:
+When 5 or more nodes go down, and stay down, past a time threshhold (`hub_down_alert_time_ms`, default 3 min), it's considered a hub-down outage and will look like this:
 
 :fire::fire: **12** nodes down at once, looking like a hub went down 3 min ago. Suspected root cause node: **aa.bb.cc.dd**
 

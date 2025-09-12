@@ -36,7 +36,7 @@ suppress_duration_STOPWATCH_s = 10800
 
 # what hour/min the daily report goes out, 24h format, local time
 reporting_hour = 9
-reporting_minute = 1
+reporting_minute = 0
 
 # how long before a down node is considered abandoned, and so removed from alerting and reporting
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
@@ -121,10 +121,11 @@ conn.commit()
 # to keep state across app restart, you can copy/paste the last state from node_watcher.log 
 removed_nodes_tracker = {}
 hub_down_tracker = {}
+
 # this is only used during hub-down events, to prevent _many_ API calls (to get emojis).
 # referencing this list is quick and API-free at the small cost of it only knows about
-# nodes that it has looked up previously (for not hub-down events)
-silenced_nodes_cache = ["10.69.3.32", "10.69.48.1"]
+# nodes that it has looked up previously (for _not_ hub-down events)
+silenced_nodes_cache = []
 
 
 
