@@ -6,6 +6,9 @@ export NODE_WATCHER_ENVIRONMENT
 SLACK_CHANNEL="<your_slack_channel>"
 export SLACK_CHANNEL
 
+SLACK_ESCALATION_CHANNEL="<your_slack_escalations_channel>"
+export SLACK_ESCALATION_CHANNEL
+
 SLACK_THREAD_URI_PREFIX="https://<your_organization>.slack.com/archives/"
 export SLACK_THREAD_URI_PREFIX
 

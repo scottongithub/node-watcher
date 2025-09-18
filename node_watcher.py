@@ -6,11 +6,12 @@ from time import sleep
 
 # Node-Watcher is launched from node_watcher_launcher.sh, which provides the following environent variables
 try:
-  environment       = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
-  channel           = os.environ['SLACK_CHANNEL']
-  token             = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
-  thread_URI_prefix = os.environ['SLACK_THREAD_URI_PREFIX']
-  BIRD_API_prefix   = os.environ['BIRD_API_PREFIX']
+  environment        = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
+  channel            = os.environ['SLACK_CHANNEL']
+  escalation_channel = os.environ['SLACK_ESCALATION_CHANNEL']
+  token              = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
+  thread_URI_prefix  = os.environ['SLACK_THREAD_URI_PREFIX']
+  BIRD_API_prefix    = os.environ['BIRD_API_PREFIX']
   Node_Explorer_API_prefix = os.environ['NODE_EXPORER_API_PREFIX']
 except Exception as error:
   print("problem with importing an environment variable, make sure you run this from node_watcher_launcher.sh or node_node_watcher_launcher_dev.sh", error)
@@ -81,7 +82,7 @@ if environment == "dev":
 	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
 	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	time_rollback_s              = 120 # time machine - good for replaying interesting events
+	time_rollback_s              = 0 # time machine - good for replaying interesting events
 
 
 
@@ -780,17 +781,18 @@ while True:
 				body += (" *" + str(len(hub_down_nodes_current)) + "* nodes down at once, looking like a hub went down " + get_downtime_humanized( hub_down_nodes_current[0]) + " ago. ")
 				body += ("Suspected root cause node: *" + suspected_problem_node + "*. ")
 				body += ("Details and tracking in this here thread :thread:")
-				if len(hub_down_nodes_current) >= hub_down_raise_qty:
-					body += " <!channel>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
 				json_data = response.json()
 				thread_ts = json_data["ts"]
 				query = 'INSERT into slack_threads(node_ip, thread_ts) VALUES(?,?)'
 				db_conn.execute(query, (hub_down_group, thread_ts, ))
 
+				body = ""
+				if len(hub_down_nodes_current) >= hub_down_raise_qty:
+					body += ("*Note: this hub-down event has been escalated*\n")
 				node_map_URI = node_map_prefix
 				nodes_to_be_mapped = []
-				body = "*Nodes that are down from this hub outage:*\n"
+				body += "*Nodes that are down from this hub outage:*\n"
 				for router_id in hub_down_nodes_current:
 					body += router_id + "  "
 					nodes_to_be_mapped.append(IP_to_NN( router_id ))
@@ -799,6 +801,29 @@ while True:
 				body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes in this outage>"
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 				hub_down_tracker.update({hub_down_group: {"alerting" : True}})
+
+				json_data = response.json()
+				thread_ts = json_data["message"]["thread_ts"]
+				latest_post_ts = json_data["message"]["ts"]
+				hubdown_parent_thread_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
+
+
+				######################
+				###   ESCALATION   ###
+				######################
+
+				if len(hub_down_nodes_current) >= hub_down_raise_qty:
+					body = ""
+					for i in range( round(len(hub_down_nodes_current)/ 5)):
+						body += ":fire:"
+					body += (" *" + str(len(hub_down_nodes_current)) + "* nodes down at once, looking like a hub went down " + get_downtime_humanized( hub_down_nodes_current[0]) + " ago. ")
+					body += ("Suspected root cause node: *" + suspected_problem_node + "*. ")
+					body += ("All tracking for this event, including when it is resolved, is kept <" + hubdown_parent_thread_URI + "|in this thread> " )
+					# body = (":fire: looks like a hub has gone down. Suspected root cause node: *" + suspected_problem_node + "*. \n")
+					# body += "Tracking for this event is kept <" + hubdown_parent_thread_URI + "|here in this thread>"
+					application_log.debug(f"hub-down escalation body: {body}")			
+					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": escalation_channel, "unfurl_links": False }))
+
 
 
 			if hub_down_nodes_current and len(hub_down_nodes_current) < hub_down_node_qty:
