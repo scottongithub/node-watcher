@@ -37,7 +37,7 @@ suppress_duration_STOPWATCH_s = 10800
 
 # what hour/min the daily report goes out, 24h format, local time
 reporting_hour = 9
-reporting_minute = 0
+reporting_minute = 1
 
 # how long before a down node is considered abandoned, and so removed from alerting and reporting
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
@@ -82,7 +82,7 @@ if environment == "dev":
 	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
 	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	time_rollback_s              = 0 # time machine - good for replaying interesting events
+	time_rollback_s              = 119699 # time machine - good for replaying interesting events
 
 
 
@@ -381,9 +381,9 @@ def get_downtime_humanized( router_id ):
 	alert_threshold_m = round(alert_time_threshold_ms / 60000) 
 	down_time_m = int(((current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"])) / 60000)
 	# doing this to make things look cleaner from rounding, at the cost of a bit of accuracy
-	if down_time_m in [alert_threshold_m - 1, alert_threshold_m, alert_threshold_m + 1]:
-		downtime_humanized = str(alert_threshold_m) + " min"
-		return ( downtime_humanized )
+	# if down_time_m in [alert_threshold_m - 1, alert_threshold_m, alert_threshold_m + 1]:
+	# 	downtime_humanized = str(alert_threshold_m) + " min"
+	# 	return ( downtime_humanized )
 	if down_time_m < 60:
 		downtime_humanized = str(down_time_m) + " min"
 	elif 60 <= down_time_m < 2880:
