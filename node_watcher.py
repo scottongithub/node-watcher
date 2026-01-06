@@ -3,7 +3,6 @@ import datetime as dt
 from time import sleep
 
 
-
 # Node-Watcher is launched from node_watcher_launcher.sh, which provides the following environent variables
 try:
   environment        = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
@@ -14,15 +13,16 @@ try:
   BIRD_API_prefix    = os.environ['BIRD_API_PREFIX']
   Node_Explorer_API_prefix = os.environ['NODE_EXPORER_API_PREFIX']
 except Exception as error:
-  print("problem with importing an environment variable, make sure you run this from node_watcher_launcher.sh or node_node_watcher_launcher_dev.sh", error)
+  print("problem with importing an environment variable, make sure you run this from node_watcher_launcher.sh or node_watcher_launcher_dev.sh", error)
   exit(1)
 
 
-delete_message_URI  = "https://slack.com/api/chat.delete"
-get_reactions_URI   = "https://slack.com/api/reactions.get"
-post_message_URI    = "https://slack.com/api/chat.postMessage"
-node_map_prefix     = "https://www.nycmesh.net/map/nodes/"
-http_headers        = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
+delete_message_URI        = "https://slack.com/api/chat.delete"
+get_reactions_URI         = "https://slack.com/api/reactions.get"
+post_message_URI          = "https://slack.com/api/chat.postMessage"
+node_map_prefix           = "https://www.nycmesh.net/map/nodes/"
+conversations_replies_URI = "https://slack.com/api/conversations.replies"
+http_headers              = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
 
 
 
@@ -37,10 +37,15 @@ suppress_duration_STOPWATCH_s = 10800
 
 # what hour/min the daily report goes out, 24h format, local time
 reporting_hour = 9
-reporting_minute = 0
+reporting_minute = 1
 
-# how long before a down node is considered abandoned, and so removed from alerting and reporting
+# how long before a down node is considered abandoned, and so removed from alerting and reporting, until it shows back up in the LSDB
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
+
+# an emoji, to indicate flapping, will be added to a node's main channel message if the node has flapped 'qty' or more times within the window
+flap_time_window_hrs = 24
+flap_time_window_qty = 4  # any state change, up or down, counts as 1
+flap_emoji = ":wackywavinginflatablearmman:"
 
 # gonna split logging up between application and network so let's be fancy about it
 def setup_logger(name, log_file, log_level):
@@ -60,14 +65,14 @@ if environment == "prod":
 	node_watcher_db 	= "./node-watcher.db"
 	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
 	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
-	error_sleep_time_s           = 10 # how long the main loop waits to run again if there's an error
-	hub_watcher_mode             = True # can be disabled for troubleshooting
-	hub_down_node_qty            = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
-	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
-	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
-	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	use_database_persistence     = True # instead of copy-pasting removed_nodes_tracker and friends in from the logfile
-	time_rollback_s              = 0 # time machine - good for replaying interesting events
+	error_sleep_time_s           = 10     # how long the main loop waits to run again if there's an error
+	hub_watcher_mode             = True   # can be disabled for troubleshooting
+	hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
+	hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
+	hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
+	root_cause_guesser_timeout_s = 40     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
+	use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this file. will probably make this permanent soon
+	time_rollback_s              = 0      # time machine - good for replaying interesting events
 
 
 if environment == "dev":
@@ -77,14 +82,14 @@ if environment == "dev":
 	node_watcher_db 	= "./node-watcher-dev.db"
 	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
 	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
-	error_sleep_time_s           = 60 # how long the main loop waits to run again if there's an error 
-	hub_watcher_mode             = True # can be disabled for troubleshooting
-	hub_down_node_qty            = 5 # how many nodes need to go down at once for the event to be treated as 'hub-down'
-	hub_down_raise_qty           = 25 # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
-	hub_down_report_interval_s   = 60 # if reporting has been enabled by user, how often reports (of what nodes are still down) go out
-	root_cause_guesser_timeout_s = 40 # in case guessing a hub outages root cause gets hung up
-	use_database_persistence     = True # instead of copy-pasting removed_nodes_tracker and friends in from the logfile
-	time_rollback_s              = 0 # time machine - good for replaying interesting events
+	error_sleep_time_s           = 60     # how long the main loop waits to run again if there's an error 
+	hub_watcher_mode             = True   # can be disabled for troubleshooting
+	hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
+	hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
+	hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
+	root_cause_guesser_timeout_s = 40     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
+	use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this file. will probably make this permanent soon
+	time_rollback_s              = 0      # time machine - good for replaying interesting events
 
 
 
@@ -99,7 +104,15 @@ node_down_emoji = ":point_down:"
 
 # # Halloween
 # node_up_emoji = ":jack_o_lantern:"
-# node_down_emoji = ":female_zombie:"
+# node_down_emoji = ":ghost:"
+
+# # Thanksgiving
+# node_up_emoji = ":turkey:"
+# node_down_emoji = ":poultry_leg:"
+
+# # Present time
+# node_up_emoji = ":gift:"
+# node_down_emoji = ":grinch:"
 
 
 
@@ -121,33 +134,32 @@ db_conn.execute('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT PRIMA
 conn.commit()
 
 
-# removed nodes and their timers are tracked here
-# to keep state across app restart, you can copy/paste the last state from node_watcher.log 
+# removed nodes and their timers are tracked here. this is just to initialize - you can override the db below 
 removed_nodes_tracker = {}
 hub_down_tracker = {}
 
-# this is only used during hub-down events, to prevent _many_ API calls (to get emojis).
+# this is only used during hub-down events, to prevent _many_ API calls (to get emojis). 
 # referencing this list is quick and API-free at the small cost of it only knows about
-# nodes that it has looked up previously (for _not_ hub-down events)
+# nodes that it has looked up previously (during _not_ hub-down events)
 silenced_nodes_cache = []
 
 if use_database_persistence == True:
-  for variable in [removed_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
-    variable_name = [name for name, value in locals().items() if value is variable][0]
-    query = 'SELECT value FROM persistence WHERE variable_name = ?'
-    row = db_conn.execute(query, (variable_name, )) 
-    row = row.fetchall()
-    try:
-    	json_data = row[0][0]
-    	globals()[variable_name] = json.loads( json_data )
-    except Exception as e:
-      application_log.error('Error', exc_info=e)
-      continue
+	for variable in [removed_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
+		variable_name = [name for name, value in locals().items() if value is variable][0]
+		query = 'SELECT value FROM persistence WHERE variable_name = ?'
+		row = db_conn.execute(query, (variable_name, )) 
+		row = row.fetchall()
+		try:
+			json_data = row[0][0]
+			globals()[variable_name] = json.loads( json_data )
+		except Exception as e:
+			application_log.error('Error', exc_info=e)
+			continue
 
-  # # Database Override
-  # removed_nodes_tracker = {}
-  # hub_down_tracker = {}
-  # silenced_nodes_cache = []
+	# Database Override
+	# removed_nodes_tracker = {}
+	# hub_down_tracker = {}
+	# silenced_nodes_cache = []
 
 
 
@@ -248,6 +260,7 @@ def is_silenced( router_id ):
 				if round(now_s) - round(float(message_ts)) < suppress_duration_STOPWATCH_s:
 					return True
 
+	# housekeeping on the cache - at this point we know the router isn't silenced so remove from cache  
 	if router_id in silenced_nodes_cache:
 		silenced_nodes_cache.remove(router_id)
 
@@ -475,7 +488,6 @@ def get_closest_common_upstream( node_list, before_outage_timestamp ):
 	return( most_frequent_and_closest( outage_exit_nodes ))
 
 
-
 def get_hub_down_group_members( hub_down_group ):
 	hub_down_group_members = []
 	_removed_nodes_tracker = removed_nodes_tracker
@@ -495,7 +507,27 @@ def get_node_webmap_URI( nodes_to_be_mapped ):
 			node_map_URI += str(node) + "-"
 		else:
 			node_map_URI += str(node)
-	return(node_map_URI)
+	return( node_map_URI )
+
+
+def is_flapping_currently( router_id ):
+	query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
+	row = db_conn.execute(query, (router_id,))
+	row = row.fetchall()
+	thread_ts = row[0][1]
+	print(str(time.time() - ( flap_time_window_hrs * 3600 )))
+	response = requests.get(conversations_replies_URI, headers=http_headers, params={	"channel": channel, "ts": thread_ts, "oldest": str(int(time.time() - (flap_time_window_hrs * 3600)))})
+	json_data = response.json()
+	message_qty = 0
+	for item in json_data["messages"]:
+			# slack will return the parent of the thread as one of the messages, regardless of timestamp, so we need to check its time, too
+			if float(item["ts"]) > time.time() - (flap_time_window_hrs * 3600):
+				message_qty += 1
+	application_log.info(f"{str(time.time())} router_id: {str(router_id)} qty: {str(message_qty)}\n") # REMOVE
+	if message_qty >= flap_time_window_qty:
+		return(True)
+	else:
+		return(False) 
 
 
 
@@ -560,9 +592,9 @@ while True:
 			node_changes_log.info(f"{current_timestamp_ms} Added: {recently_added_nodes}\n")
 			
 			# In case many nodes in a hub-down event come back up right away,
-			# they should all be sent out one request, otherwise there may be 
+			# they should all get batched into one post in the hub-down thread, otherwise there may be 
 			# rate-limiting issues. `hub_down_added_nodes` tracks that info across for-loops
-			# structure: {<hub down group ID_1>:[list-of-returned-nodes], <hub down group ID_2>:[list-of-returned-nodes]}
+			# structure: {<hub down group ID_1>:[list-of-returned-nodes], <hub down group ID_2>:[list-of-returned-nodes], etc}
 			hub_down_added_nodes = {} 
 
 			for router_id in recently_added_nodes:
@@ -606,13 +638,15 @@ while True:
 					json_data       = response.json()
 					thread_ts       = json_data["message"]["thread_ts"]
 					latest_post_ts  = json_data["message"]["ts"]
-					latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
+					latest_post_URI = thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
 					# Post alert message to main channel
 					# application_log.info( "is silenced: " )
 					# application_log.info( str(is_silenced( router_id ) ))
-					body = (node_up_emoji + " " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
-					body += " <" + latest_post_URI + "|node history>"
+					body = node_up_emoji + " "
+					if is_flapping_currently( router_id ):
+						body += flap_emoji + " "
+					body += router_id + " is up! Downtime " + get_downtime_humanized( router_id ) + " <" + latest_post_URI + "|node history>"
 					for user_id in subscribed_users:
 						body += " <@" + user_id + "> "						
 					application_log.debug(f"node up body: {body}")			
@@ -643,7 +677,6 @@ while True:
 
 
 
-
 			if hub_down_added_nodes:
 
 				application_log.info(f"hub_down_added_nodes: {hub_down_added_nodes}")
@@ -669,9 +702,6 @@ while True:
 						body = (":sunglasses: all nodes are up" )
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 						hub_down_tracker.pop(hub_down_group)
-
-
-
 
 
 
@@ -753,8 +783,10 @@ while True:
 
 						# Post message to main channel
 						# application_log.debug(f"{router_id} is silenced: {str(is_silenced(router_id))}")
-						body = (node_down_emoji + " " + router_id + " has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms ))
-						body += " <" + latest_post_URI + "|node history>"
+						body = node_down_emoji + " "
+						if is_flapping_currently( router_id ):
+							body += " " + flap_emoji
+						body += router_id + " has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms ) + " <" + latest_post_URI + "|node history>"
 						for user_id in subscribed_users:
 							body += " <@" + user_id + "> "
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
@@ -875,7 +907,25 @@ while True:
 									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
-		# commit changes to database ;)
+
+		######################################
+		###   DUMP APP STATE TO DATABASE   ###
+		######################################
+
+
+		if use_database_persistence == True:
+			for variable in [removed_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
+				variable_name = [name for name, value in locals().items() if value is variable][0]
+				json_data = json.dumps( variable )
+				# ('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT, value TEXT)')
+				query = 'INSERT or REPLACE into persistence(variable_name, value) VALUES(?,?)' 
+				dummy_data = db_conn.execute(query, (variable_name, json_data,))
+
+			query = 'INSERT or REPLACE into persistence(variable_name, value) VALUES(?,?)' 
+			db_conn.execute(query, ("current_timestamp_ms", current_timestamp_ms,))
+
+
+		# commit changes to db ;)
 		conn.commit()
 
 
@@ -896,7 +946,7 @@ while True:
 					row = db_conn.execute(query, (router_id, ))
 					row = row.fetchall()
 					thread_ts = row[0][1]
-					body = (":skull_and_crossbones: " + router_id + " has been down for "  + get_downtime_humanized( router_id ) + " and is now removed from alerting ")
+					body = (":skull_and_crossbones: " + router_id + " has been down for "  + get_downtime_humanized( router_id ) + " and is now removed from alerting until it shows back up in LSDB ")
 					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "thread_ts": thread_ts}))
  
 			down_report_summary = ":bar_chart:  Down node report: " + str(len(removed_nodes_tracker) - len(abandoned_nodes)) + " nodes"
@@ -937,24 +987,8 @@ while True:
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
-    #################################
-		###   PERSIST WITH DATABASE   ###
-    #################################
-
-		if use_database_persistence == True:
-			for variable in [removed_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
-				variable_name = [name for name, value in locals().items() if value is variable][0]
-				json_data = json.dumps( variable )
-				# ('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT, value TEXT)')
-				query = 'INSERT or REPLACE into persistence(variable_name, value) VALUES(?,?)' 
-				dummy_data = db_conn.execute(query, (variable_name, json_data,))
-
-			query = 'INSERT or REPLACE into persistence(variable_name, value) VALUES(?,?)' 
-			dummy_data = db_conn.execute(query, ("current_timestamp_ms", current_timestamp_ms,))
-			conn.commit()
-
-
 		print(str(removed_nodes_tracker) + "\n" + str(hub_down_tracker) + "\n" + str(silenced_nodes_cache))
+		print(str(current_timestamp_ms))
 		if time_rollback_s != 0:
 			application_log.info(a_minute_ago_snapshot_URI)
 		application_log.info(f"{current_timestamp_ms}\n{removed_nodes_tracker}\n{hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
