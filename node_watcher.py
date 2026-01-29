@@ -25,28 +25,6 @@ conversations_replies_URI = "https://slack.com/api/conversations.replies"
 http_headers              = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
 
 
-
-#####################
-####   CONFIG    ####
-#####################
-
-
-# different reactions can suppress alert message for different times - "suppress_duration_<slack's-name-of-reaction>_s"
-suppress_duration_DATE_s = 86400
-suppress_duration_STOPWATCH_s = 10800
-
-# what hour/min the daily report goes out, 24h format, local time
-reporting_hour = 9
-reporting_minute = 1
-
-# how long before a down node is considered abandoned, and so removed from alerting and reporting, until it shows back up in the LSDB
-abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
-
-# an emoji, to indicate flapping, will be added to a node's main channel message if the node has flapped 'qty' or more times within the window
-flap_time_window_hrs = 24
-flap_time_window_qty = 4  # any state change, up or down, counts as 1
-flap_emoji = ":wackywavinginflatablearmman:"
-
 # gonna split logging up between application and network so let's be fancy about it
 def setup_logger(name, log_file, log_level):
 	formatter = logging.Formatter('%(levelname)s %(message)s')
@@ -58,22 +36,46 @@ def setup_logger(name, log_file, log_level):
 	return logger
 
 
+
+#####################
+####   CONFIG    ####
+#####################
+
+
+alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
+hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
+hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
+hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
+hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
+
+# different reactions can suppress alert message for different times - "suppress_duration_<slack's-name-of-reaction>_s"
+suppress_duration_DATE_s = 86400
+suppress_duration_STOPWATCH_s = 10800
+
+# what hour/min the daily report goes out, 24h format, local time
+reporting_hour = 9
+reporting_minute = 0
+
+# how long before a down node is considered abandoned, and so removed from alerting and reporting, until it shows back up in the LSDB
+abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
+
+# a node is considered to be flappy if it meets or exceeds `flap_time_window_qty` inside of `flap_time_window_hrs`
+flap_time_window_hrs = 24
+flap_time_window_qty = 12  # any state change, up or down, counts as 1
+flap_emoji = ":wackywavinginflatablearmman:"
+
+error_sleep_time_s           = 10     # how long the main loop waits to run again if there's an error
+hub_watcher_mode             = True   # can be disabled for troubleshooting
+root_cause_guesser_timeout_s = 40     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
+use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this py file. will probably make this permanent soon
+time_rollback_s              = 0      # time machine - leave as 0 in prod
+
+
 if environment == "prod":
 	log_level         = logging.INFO
 	application_log   = setup_logger('application_log', './node_watcher.log', log_level) # application-level logs
 	node_changes_log  = setup_logger('node_changes_log', './node_changes.log', log_level) # OSPF-level logs
 	node_watcher_db 	= "./node-watcher.db"
-	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
-	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
-	error_sleep_time_s           = 10     # how long the main loop waits to run again if there's an error
-	hub_watcher_mode             = True   # can be disabled for troubleshooting
-	hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
-	hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
-	hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
-	root_cause_guesser_timeout_s = 40     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
-	use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this file. will probably make this permanent soon
-	time_rollback_s              = 0      # time machine - good for replaying interesting events
-
 
 if environment == "dev":
 	log_level         = logging.DEBUG
@@ -81,15 +83,18 @@ if environment == "dev":
 	node_changes_log  = setup_logger('node_changes_log', './node_changes_dev.log', log_level) # OSPF-level logs
 	node_watcher_db 	= "./node-watcher-dev.db"
 	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
-	hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
+	hub_down_alert_time_ms       = 120000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
 	error_sleep_time_s           = 60     # how long the main loop waits to run again if there's an error 
 	hub_watcher_mode             = True   # can be disabled for troubleshooting
-	hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
+	hub_down_node_qty            = 3      # how many nodes need to go down at once for the event to be treated as 'hub-down'
 	hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
 	hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
 	use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this file. will probably make this permanent soon
 	time_rollback_s              = 0      # time machine - good for replaying interesting events
+	reporting_hour               = 9
+	reporting_minute             = 1
+	flap_time_window_qty         = 6      # any state change, up or down, counts as 1
 
 
 
@@ -130,12 +135,15 @@ db_conn.execute('CREATE TABLE IF NOT EXISTS alert_messages(node_ip TEXT, thread_
 db_conn.execute('CREATE INDEX IF NOT EXISTS alert_messages_index ON alert_messages(node_ip)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )')
 db_conn.execute('CREATE INDEX IF NOT EXISTS subscriptions_index ON subscriptions(node_ip)')
+db_conn.execute('CREATE TABLE IF NOT EXISTS node_state_changes(timestamp_ms INTEGER, router_id TEXT, state TEXT)')
+db_conn.execute('CREATE INDEX IF NOT EXISTS node_state_changes_index ON node_state_changes(timestamp_ms)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT PRIMARY KEY, value TEXT)')
 conn.commit()
 
 
 # removed nodes and their timers are tracked here. this is just to initialize - you can override the db below 
 removed_nodes_tracker = {}
+flappy_nodes_tracker = {}
 hub_down_tracker = {}
 
 # this is only used during hub-down events, to prevent _many_ API calls (to get emojis). 
@@ -144,7 +152,7 @@ hub_down_tracker = {}
 silenced_nodes_cache = []
 
 if use_database_persistence == True:
-	for variable in [removed_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
+	for variable in [removed_nodes_tracker, flappy_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
 		variable_name = [name for name, value in locals().items() if value is variable][0]
 		query = 'SELECT value FROM persistence WHERE variable_name = ?'
 		row = db_conn.execute(query, (variable_name, )) 
@@ -153,11 +161,12 @@ if use_database_persistence == True:
 			json_data = row[0][0]
 			globals()[variable_name] = json.loads( json_data )
 		except Exception as e:
-			application_log.error('Error', exc_info=e)
+			application_log.error(f'Variable {variable_name} does not exist in db - maybe this is a fresh setup? Ignore this error if so', exc_info=e)
 			continue
 
-	# Database Override
+	# Database Override - past states are available in log file for copy-paste
 	# removed_nodes_tracker = {}
+	# flappy_nodes_tracker = {}
 	# hub_down_tracker = {}
 	# silenced_nodes_cache = []
 
@@ -290,7 +299,7 @@ def get_subscribed_users( router_id ):
 					subscribed_users.append( user )
 
 			# Let's first update the subscriptions table to reflect all users' wishes
-			if reaction["name"] == "heart":
+			if reaction["name"] in ["heart", "hearts"]:
 				query = '''INSERT or IGNORE into subscriptions(node_ip) VALUES(?)'''
 				db_conn.execute(query, ( router_id, ))
 				for user in reaction["users"]:
@@ -315,7 +324,7 @@ def get_subscribed_users( router_id ):
 					subbed_users_in_db = json.loads(row[0][0])
 					for user in reaction["users"]:
 						# get index of the user, then remove the user by index
-						# TODO: there has to be a better way, someone help me fix this please
+						# TODO: there has to be a better way, this is ugly
 						try:
 							rem_indx = subbed_users_in_db.index(user)
 							query = ''' UPDATE subscriptions
@@ -353,7 +362,7 @@ def get_subscribed_users( router_id ):
 						subscribed_users.append( user )
 
 				# Let's first update the subscriptions table to reflect all users' wishes
-				if reaction["name"] == "heart":
+				if reaction["name"] in ["heart", "hearts"]:
 					query = '''INSERT or IGNORE into subscriptions(node_ip) VALUES(?)'''
 					db_conn.execute(query, ( router_id, ))
 					for user in reaction["users"]:
@@ -490,13 +499,9 @@ def get_closest_common_upstream( node_list, before_outage_timestamp ):
 
 def get_hub_down_group_members( hub_down_group ):
 	hub_down_group_members = []
-	_removed_nodes_tracker = removed_nodes_tracker
-	for router_id in _removed_nodes_tracker:
-		try:
-			if _removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group:
-				hub_down_group_members.append(router_id)
-		except:
-			pass
+	for router_id in removed_nodes_tracker:
+		if removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group:
+			hub_down_group_members.append(router_id)
 	return( hub_down_group_members )
 
 
@@ -510,25 +515,27 @@ def get_node_webmap_URI( nodes_to_be_mapped ):
 	return( node_map_URI )
 
 
-def is_flapping_currently( router_id ):
-	query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
-	row = db_conn.execute(query, (router_id,))
+def get_flappy_nodes( current_timestamp_ms ):
+	beginning_of_window = current_timestamp_ms - ( flap_time_window_hrs * 3600000 )
+	query = 'SELECT DISTINCT router_id FROM node_state_changes WHERE timestamp_ms BETWEEN ? AND ?'
+	row = db_conn.execute(query, (beginning_of_window, current_timestamp_ms, ))
 	row = row.fetchall()
-	thread_ts = row[0][1]
-	print(str(time.time() - ( flap_time_window_hrs * 3600 )))
-	response = requests.get(conversations_replies_URI, headers=http_headers, params={	"channel": channel, "ts": thread_ts, "oldest": str(int(time.time() - (flap_time_window_hrs * 3600)))})
-	json_data = response.json()
-	message_qty = 0
-	for item in json_data["messages"]:
-			# slack will return the parent of the thread as one of the messages, regardless of timestamp, so we need to check its time, too
-			if float(item["ts"]) > time.time() - (flap_time_window_hrs * 3600):
-				message_qty += 1
-	application_log.info(f"{str(time.time())} router_id: {str(router_id)} qty: {str(message_qty)}\n") # REMOVE
-	if message_qty >= flap_time_window_qty:
-		return(True)
-	else:
-		return(False) 
+	flappy_nodes = []
+	for router_id in row:
+		query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
+		row = db_conn.execute(query, (router_id[0], beginning_of_window, current_timestamp_ms, ))
+		row = row.fetchall()
+		if row[0][0] >= flap_time_window_qty:
+			flappy_nodes.append( router_id[0] )
+	return(flappy_nodes)
 
+
+def get_flap_qty( router_id, current_timestamp_ms ):
+	beginning_of_window = current_timestamp_ms - ( flap_time_window_hrs * 3600000 )
+	query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
+	row = db_conn.execute(query, (router_id, beginning_of_window, current_timestamp_ms, ))
+	row = row.fetchall()
+	return(row[0][0])
 
 
 #####################
@@ -579,7 +586,6 @@ while True:
 		recently_removed_nodes = list(set(previous_nodes) - set(current_nodes))
 
 
-
 		################################
 		#####  LOGIC AND ALERTING  #####
 		################################
@@ -587,9 +593,14 @@ while True:
 
 		current_timestamp_ms = int( time.time() * 1000 ) - int( time_rollback_s * 1000 )
 
+		flappy_nodes = get_flappy_nodes( current_timestamp_ms )
+
 		if recently_added_nodes:
 
 			node_changes_log.info(f"{current_timestamp_ms} Added: {recently_added_nodes}\n")
+			for router_id in recently_added_nodes:
+				query = 'INSERT into node_state_changes(timestamp_ms, router_id, state) VALUES(?,?, "up")'
+				db_conn.execute(query, (current_timestamp_ms, router_id, ))
 			
 			# In case many nodes in a hub-down event come back up right away,
 			# they should all get batched into one post in the hub-down thread, otherwise there may be 
@@ -631,7 +642,10 @@ while True:
 					row       = db_conn.execute(query, (router_id,))
 					row       = row.fetchall()
 					thread_ts = row[0][1]
-					body      = (":point_up: " + router_id + " is up! Downtime " + get_downtime_humanized( router_id ) )
+					body      = (":point_up: ")
+					if router_id in flappy_nodes:
+						body += flap_emoji + " "
+					body += router_id + " is up! Downtime " + get_downtime_humanized( router_id )
 					response  = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 					# Get timestamp from the post above - to be added to main thread message as a link
@@ -644,8 +658,9 @@ while True:
 					# application_log.info( "is silenced: " )
 					# application_log.info( str(is_silenced( router_id ) ))
 					body = node_up_emoji + " "
-					if is_flapping_currently( router_id ):
+					if router_id in flappy_nodes:
 						body += flap_emoji + " "
+						flappy_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : True}
 					body += router_id + " is up! Downtime " + get_downtime_humanized( router_id ) + " <" + latest_post_URI + "|node history>"
 					for user_id in subscribed_users:
 						body += " <@" + user_id + "> "						
@@ -669,6 +684,7 @@ while True:
 				and router_id not in silenced_nodes_cache:
 
 					hub_down_group = removed_nodes_tracker[router_id]["hub_down_group"]
+					print("691" + str(type(hub_down_group)))
 					if not hub_down_group in hub_down_added_nodes:
 						hub_down_added_nodes[hub_down_group] = []
 
@@ -701,13 +717,21 @@ while True:
 					if not get_hub_down_group_members( hub_down_group ):
 						body = (":sunglasses: all nodes are up" )
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
-						hub_down_tracker.pop(hub_down_group)
+						print("724" + str(type(hub_down_group)))
+						try:
+							hub_down_tracker.pop(hub_down_group) # under normal conditions this works
+						except:
+							hub_down_tracker.pop(str(hub_down_group)) # if the program has been restarted during hub-down event, hub_down_tracker is loaded from db, and keys are now str, not int TODO fix this
 
 
 
 		if recently_removed_nodes:
 
 			node_changes_log.info(f"Removed: {str( current_timestamp_ms )} {str( recently_removed_nodes )} \n")
+			for router_id in recently_removed_nodes:
+				query = 'INSERT into node_state_changes(timestamp_ms, router_id, state) VALUES(?,?, "down")'
+				db_conn.execute(query, (current_timestamp_ms, router_id, ))
+
 
 			# Need this to decide if this may be a hub-down event
 			unsuppressed_qty = 0
@@ -772,7 +796,10 @@ while True:
 						row = db_conn.execute(query, (router_id, ))
 						row = row.fetchall()
 						thread_ts = row[0][1]
-						body = (":point_down: " + router_id + " has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms ))
+						body = (":point_down: ")
+						if router_id in flappy_nodes:
+							body += flap_emoji + " "
+						body += router_id + " has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms )
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 						# Get timestamp from the post above - to be added to main channel message as a link
@@ -784,8 +811,9 @@ while True:
 						# Post message to main channel
 						# application_log.debug(f"{router_id} is silenced: {str(is_silenced(router_id))}")
 						body = node_down_emoji + " "
-						if is_flapping_currently( router_id ):
+						if router_id in flappy_nodes:
 							body += " " + flap_emoji
+							flappy_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : True}
 						body += router_id + " has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms ) + " <" + latest_post_URI + "|node history>"
 						for user_id in subscribed_users:
 							body += " <@" + user_id + "> "
@@ -819,6 +847,7 @@ while True:
 			application_log.info(f"hub_down_nodes_current: {hub_down_nodes_current}")
 			if hub_down_nodes_current and len(hub_down_nodes_current) >= hub_down_node_qty: # need to do this check again in case any nodes have come back up
 				hub_down_group = removed_nodes_tracker[hub_down_nodes_current[0]]["timestamp"]
+				print("850" + str(type(hub_down_group)))
 
 				a_minute_before_outage = round(hub_down_group / 1000) - 60
 				two_min_before_outage = round(hub_down_group / 1000) - 120
@@ -900,11 +929,91 @@ while True:
 								if reaction["name"] == "eyes":
 									body = (":cry: *Nodes that are still down from this hub outage (enabled by leaving :eyes: reaction on parent):*\n")
 									nodes_to_be_mapped = []
-									for router_id in get_hub_down_group_members(hub_down_group):
+									for router_id in get_hub_down_group_members(int(hub_down_group)):
 										body += router_id + " "
 										nodes_to_be_mapped.append(IP_to_NN( router_id ))
 									body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of nodes that are still down in this outage>"
 									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
+
+		conn.commit()
+
+
+
+		#################################
+		###   ALERT ON FLAPPY NODES   ###
+		#################################
+
+
+		if flappy_nodes:
+			for router_id in flappy_nodes:
+				if is_silenced( router_id ) == False \
+				and router_id not in flappy_nodes_tracker \
+				and (router_id not in removed_nodes_tracker \
+				or (router_id in removed_nodes_tracker \
+				and removed_nodes_tracker[router_id]["alerting"] == False)):
+					# schema: 'CREATE TABLE IF NOT EXISTS slack_threads(node_ip TEXT, thread_ts TEXT)'
+					query = ('SELECT EXISTS(SELECT * FROM slack_threads WHERE node_ip = ?)')
+					thread_exists = db_conn.execute(query, ( router_id,))
+					thread_exists = thread_exists.fetchall()
+
+					if thread_exists[0][0]:						
+						# Get reactions and update subscribed users before the last alert message is deleted
+						subscribed_users = get_subscribed_users( router_id )
+						application_log.info(f"subscribed users: {str(subscribed_users)}")
+
+						# Delete previous alert message
+						# The last alert message (in the channel) should always exist if the thread exists, but
+						# this hasn't always been the case, as the clean-up functionality was added after the
+						# app had been running for some time. The check avoids errors from the earlier versions,
+						# and can be eliminated if the App is going into a new Slack channel
+						query = ('SELECT EXISTS(SELECT * FROM alert_messages WHERE node_ip = ?)')
+						last_message_exists = db_conn.execute(query, ( router_id, ))
+						last_message_exists = last_message_exists.fetchall()
+						if last_message_exists[0][0]:
+							query = 'SELECT * FROM alert_messages WHERE node_ip = ?'
+							row = db_conn.execute(query, (router_id, ))
+							row = row.fetchall()
+							thread_ts = row[0][1]
+							response = requests.post(delete_message_URI, headers=http_headers, data=json.dumps({ "channel": channel, "ts": thread_ts}))																												
+							query = 'DELETE FROM alert_messages WHERE node_ip = ?'
+							db_conn.execute(query, (router_id, ))
+
+						# Post message to the node's history thread
+						query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
+						row = db_conn.execute(query, (router_id, ))
+						row = row.fetchall()
+						thread_ts = row[0][1]
+						body = (flap_emoji + " " + router_id + " has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours")
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
+						# Get timestamp from the post above - to be added to main channel message as a link
+						json_data = response.json()
+						thread_ts = json_data["message"]["thread_ts"]
+						latest_post_ts = json_data["message"]["ts"]
+						latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
+
+						# Post message to main channel
+						# application_log.debug(f"{router_id} is silenced: {str(is_silenced(router_id))}")
+						body = (flap_emoji + " " + router_id + " has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours" + " <" + latest_post_URI + "|node history>")
+						for user_id in subscribed_users:
+							body += " <@" + user_id + "> "
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
+
+						# Get timestamp of main-channel message - to delete it later when a new alert goes out
+						json_data = response.json()
+						thread_ts = json_data["ts"]
+						query = 'INSERT into alert_messages(node_ip, thread_ts) VALUES(?,?)'
+						db_conn.execute(query, (router_id, thread_ts, ))
+
+					else:
+						body = (":thread: *" + router_id + "* has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours")
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
+						json_data = response.json()
+						thread_ts = json_data["ts"]
+						query = 'INSERT into slack_threads(node_ip, thread_ts) VALUES(?,?)'
+						db_conn.execute(query, (router_id, thread_ts, ))
+
+					flappy_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : True}					
 
 
 
@@ -914,7 +1023,7 @@ while True:
 
 
 		if use_database_persistence == True:
-			for variable in [removed_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
+			for variable in [removed_nodes_tracker, flappy_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
 				variable_name = [name for name, value in locals().items() if value is variable][0]
 				json_data = json.dumps( variable )
 				# ('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT, value TEXT)')
@@ -924,15 +1033,14 @@ while True:
 			query = 'INSERT or REPLACE into persistence(variable_name, value) VALUES(?,?)' 
 			db_conn.execute(query, ("current_timestamp_ms", current_timestamp_ms,))
 
-
 		# commit changes to db ;)
 		conn.commit()
 
 
 
-		#######################
-		#####  REPORTING  #####
-		#######################
+		#####################################
+		#####   REPORTING AND CLEANUP   #####
+		#####################################
 
 
 		if dt.datetime.today().hour == reporting_hour and dt.datetime.today().minute == reporting_minute:
@@ -965,7 +1073,8 @@ while True:
 
 				json_data = response.json()
 				thread_ts = json_data["ts"]
-				down_report = "```NODE            DOWNTIME        SUPPRESSED \n"
+				down_report = "*Down Nodes*:\n"
+				down_report += "```NODE            DOWNTIME        SUPPRESSED \n"
 				for router_id in removed_nodes_tracker:
 					if router_id not in abandoned_nodes:
 						downtime_humanized = get_downtime_humanized( router_id )
@@ -984,14 +1093,31 @@ while True:
 				down_report += "```"
 				if nodes_to_be_mapped:
 					down_report += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes>"
+
+				if flappy_nodes:
+					down_report += "\n\n*Flappy Nodes*: \n"
+					down_report += "```NODE            FLAPS IN THE LAST " + str(flap_time_window_hrs) + " HOURS\n"
+					for router_id in flappy_nodes:
+						down_report += router_id.ljust(16, " ") + str(get_flap_qty( router_id, current_timestamp_ms )) + "\n"
+					down_report += "```"
+
+				if flappy_nodes_tracker:
+					abandoned_flappy_nodes = []
+					for router_id in flappy_nodes_tracker:
+						if current_timestamp_ms - flappy_nodes_tracker[router_id]["timestamp"] > abandoned_threshold_ms:
+							abandoned_flappy_nodes.append( router_id )
+					if abandoned_flappy_nodes:
+						for router_id in abandoned_flappy_nodes:
+							flappy_nodes_tracker.pop( router_id )
+
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
-		print(str(removed_nodes_tracker) + "\n" + str(hub_down_tracker) + "\n" + str(silenced_nodes_cache))
+		print(f"{current_timestamp_ms}\nremoved_nodes_tracker: {removed_nodes_tracker}\n\nflappy_nodes_tracker: {flappy_nodes_tracker}\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
 		print(str(current_timestamp_ms))
 		if time_rollback_s != 0:
 			application_log.info(a_minute_ago_snapshot_URI)
-		application_log.info(f"{current_timestamp_ms}\n{removed_nodes_tracker}\n{hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
+		application_log.info(f"{current_timestamp_ms}\nremoved_nodes_tracker: {removed_nodes_tracker}\n\nflappy_nodes_tracker: {flappy_nodes_tracker}\n\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
 
 		diff_s = time.time() - start_time_s
 		sleep(60 - diff_s) # this keeps us roughly in-sync with the BIRD server's cron job
