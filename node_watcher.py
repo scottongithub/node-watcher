@@ -500,8 +500,11 @@ def get_closest_common_upstream( node_list, before_outage_timestamp ):
 def get_hub_down_group_members( hub_down_group ):
 	hub_down_group_members = []
 	for router_id in removed_nodes_tracker:
-		if removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group:
-			hub_down_group_members.append(router_id)
+		try:
+			if removed_nodes_tracker[router_id]["hub_down_group"] == hub_down_group:
+				hub_down_group_members.append(router_id)
+		except:
+			pass
 	return( hub_down_group_members )
 
 
