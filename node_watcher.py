@@ -545,10 +545,10 @@ def get_flappy_nodes( current_timestamp_ms ):
 	return( flappy_nodes_unfiltered )
 
 
-def get_flap_qty( router_id, current_timestamp_ms ):
-	beginning_of_window = current_timestamp_ms - ( flap_time_window_hrs * 3600000 )
+def get_flap_qty( router_id, end_of_window_ms ):
+	beginning_of_window = end_of_window_ms - ( flap_time_window_hrs * 3600000 )
 	query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
-	row = db_conn.execute(query, (router_id, beginning_of_window, current_timestamp_ms, ))
+	row = db_conn.execute(query, (router_id, beginning_of_window, end_of_window_ms, ))
 	row = row.fetchall()
 	return(row[0][0])
 
@@ -1124,9 +1124,15 @@ while True:
 
 				if flappy_nodes:
 					down_report += "\n\n*Flappy Nodes*: \n"
-					down_report += "```NODE            FLAPS IN THE LAST " + str(flap_time_window_hrs) + " HOURS\n"
+					down_report += "```NODE            FLAPS TODAY, YESTERDAY, ETC\n"
 					for router_id in flappy_nodes:
-						down_report += router_id.ljust(16, " ") + str(get_flap_qty( router_id, current_timestamp_ms )) + "\n"
+						down_report += router_id.ljust(16, " ") + str(get_flap_qty( router_id, current_timestamp_ms )).ljust(4, " ") + \
+						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 1) )).ljust(4, " ") + \
+						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 2) )).ljust(4, " ") + \
+						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 3) )).ljust(4, " ") + \
+						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 4) )).ljust(4, " ") + \
+						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 5) )).ljust(4, " ") + \
+						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 6) )) + "\n"
 					down_report += "```"
 
 				if flappy_nodes_tracker:
