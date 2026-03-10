@@ -44,9 +44,9 @@ if __name__ == "__main__":
 
 	node = None
 	down_nodes = []
-	timestamp_s = input("enter unix timestamp in seconds (defaults to now):\n")
+	timestamp_s = input("enter unix timestamp in seconds for what snapshot of the LSDB should be consulted (<enter> for now):\n")
 	while node != "":
-		node = input("enter node IP address, <enter> twice to do calculation\n")
+		node = input("enter node IP address, then <enter>. <enter> twice to do calculation\n")
 		down_nodes.append(node)
 
 	down_nodes = down_nodes[:-1]
