@@ -73,7 +73,8 @@ use_database_persistence     = True   # persist app state in db - this used to b
 if environment == "prod":
 	log_level         = logging.INFO
 	application_log   = setup_logger('application_log', './node_watcher.log', log_level) # application-level logs
-	node_changes_log  = setup_logger('node_changes_log', './node_changes.log', log_level) # OSPF-level logs
+	node_changes_log  = setup_logger('node_changes_log', './node_changes.log', log_level)
+	link_changes_log  = setup_logger('link_changes_log', './link_changes.log', log_level)
 	node_watcher_db 	= "./node-watcher.db"
 	time_rollback_s   = 0      # time machine - leave as 0 in prod
 
@@ -81,7 +82,8 @@ if environment == "prod":
 if environment == "dev":
 	log_level         = logging.DEBUG
 	application_log   = setup_logger('application_log', './node_watcher_dev.log', log_level) # application-level logs
-	node_changes_log  = setup_logger('node_changes_log', './node_changes_dev.log', log_level) # OSPF-level logs
+	node_changes_log  = setup_logger('node_changes_log', './node_changes_dev.log', log_level)
+	link_changes_log  = setup_logger('link_changes_log', './link_changes_dev.log', log_level)
 	node_watcher_db 	= "./node-watcher-dev.db"
 	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
 	hub_down_alert_time_ms       = 120000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
@@ -138,12 +140,15 @@ db_conn.execute('CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY K
 db_conn.execute('CREATE INDEX IF NOT EXISTS subscriptions_index ON subscriptions(node_ip)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS node_state_changes(timestamp_ms INTEGER, router_id TEXT, state TEXT)')
 db_conn.execute('CREATE INDEX IF NOT EXISTS node_state_changes_index ON node_state_changes(timestamp_ms)')
+db_conn.execute('CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)')
+db_conn.execute('CREATE INDEX IF NOT EXISTS link_state_changes_index ON node_state_changes(timestamp_ms)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT PRIMARY KEY, value TEXT)')
 conn.commit()
 
 
 # removed nodes and their timers are tracked here. this is just to initialize - you can override the db below 
 removed_nodes_tracker = {}
+removed_links_tracker = {}
 flappy_nodes_tracker = {}
 hub_down_tracker = {}
 
@@ -153,7 +158,7 @@ hub_down_tracker = {}
 silenced_nodes_cache = []
 
 if use_database_persistence == True:
-	for variable in [removed_nodes_tracker, flappy_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
+	for variable in [removed_nodes_tracker, removed_links_tracker, flappy_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
 		variable_name = [name for name, value in locals().items() if value is variable][0]
 		query = 'SELECT value FROM persistence WHERE variable_name = ?'
 		row = db_conn.execute(query, (variable_name, )) 
@@ -167,6 +172,7 @@ if use_database_persistence == True:
 
 	# Database Override - past states are available in log file for copy-paste
 	# removed_nodes_tracker = {}
+	# removed_links_tracker = {}
 	# flappy_nodes_tracker = {}
 	# hub_down_tracker = {}
 	# silenced_nodes_cache = []
@@ -552,6 +558,10 @@ def get_flap_qty( router_id, end_of_window_ms ):
 	row = row.fetchall()
 	return(row[0][0])
 
+def get_link_name( advertising_router, ospf_link_json):
+	link_name = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
+	return(link_name)
+
 
 
 #####################
@@ -577,9 +587,9 @@ while True:
 		a_minute_ago_snapshot_suffix = str(a_minute_ago.strftime("%Y/%m/%d/%H/%M") + ".json")
 		a_minute_ago_snapshot_URI = BIRD_API_prefix + a_minute_ago_snapshot_suffix
 		response = requests.get(a_minute_ago_snapshot_URI)
-		deserialized_json = response.json()
+		deserialized_json_1 = response.json()
 
-		routers = deserialized_json['areas']['0.0.0.0']['routers']
+		routers = deserialized_json_1['areas']['0.0.0.0']['routers']
 		current_nodes = []
 		for ospf_node in routers:
 			current_nodes.append(ospf_node)
@@ -590,19 +600,57 @@ while True:
 		two_minutes_ago_suffix = str(two_minutes_ago.strftime("%Y/%m/%d/%H/%M") + ".json")
 		two_minutes_ago_snapshot_URI = BIRD_API_prefix + two_minutes_ago_suffix
 		response = requests.get(two_minutes_ago_snapshot_URI)
-		deserialized_json = response.json()
+		deserialized_json_2 = response.json()
 
-		routers = deserialized_json['areas']['0.0.0.0']['routers']
+		routers = deserialized_json_2['areas']['0.0.0.0']['routers']
 		previous_nodes = []
 		for ospf_node in routers:
 			previous_nodes.append(ospf_node)
 
-
 		recently_added_nodes_unfiltered   = list(set(current_nodes) - set(previous_nodes))
 		recently_removed_nodes_unfiltered = list(set(previous_nodes) - set(current_nodes))
 
+
+
+		recently_removed_links = []
+		recently_added_links = []
+
+		try:
+			for router in deserialized_json_1['areas']['0.0.0.0']['routers']:
+				# print(f'\n\n{router}')
+				if 'router' in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']:
+					for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']['router']:
+						try:
+							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']['router']:
+								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)'
+								print(f'{advertised_router}\nremoved')
+								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "up")'
+								db_conn.execute(query, (current_timestamp_ms, router, advertised_router['id'], advertised_router['metric'], ))
+								link_name = get_link_name(router, advertised_router)
+								recently_removed_links.append(link_name)
+						except Exception as e:
+							print(e)
+							pass
+
+			for router in deserialized_json_2['areas']['0.0.0.0']['routers']:
+				if 'router' in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']:
+					for advertised_router in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']['router']:
+						try:
+							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']['router']:
+								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)'
+								print(f'{advertised_router}\nadded')
+								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "down")'
+								db_conn.execute(query, (current_timestamp_ms, router, advertised_router['id'], advertised_router['metric'], ))
+								link_name = get_link_name(router, advertised_router)
+								recently_added_links.append(link_name)
+						except Exception as e:
+							print(e)
+							pass
 	
-				
+		except Exception as e:
+			print(e)
+			pass
+
 		################################
 		#####  LOGIC AND ALERTING  #####
 		################################
@@ -763,6 +811,15 @@ while True:
 						except:
 							hub_down_tracker.pop(str(hub_down_group)) # if the program has been restarted during hub-down event, hub_down_tracker is loaded from db, and keys are now str, not int TODO fix this
 
+
+		if recently_added_links:
+			for link_id in recently_added_links:
+				if link_id in removed_links_tracker and removed_links_tracker[link_id]["alerting"] == False:
+					removed_links_tracker.pop(link_id)
+				elif link_id in removed_links_tracker and removed_links_tracker[link_id]["alerting"] == True:
+					# print(f"{link_id} downtime: {get_downtime_humanized( link_id )}")
+					link_changes_log.info(f'{link_id.ljust(32, " ")}  --UP--      {dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")}   downtime: {get_downtime_humanized(link_id)}')
+					removed_links_tracker.pop(link_id)
 
 		if recently_removed_nodes:
 
@@ -1051,7 +1108,7 @@ while True:
 
 
 		if use_database_persistence == True:
-			for variable in [removed_nodes_tracker, flappy_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
+			for variable in [removed_nodes_tracker, removed_links_tracker, flappy_nodes_tracker, hub_down_tracker, silenced_nodes_cache]:
 				variable_name = [name for name, value in locals().items() if value is variable][0]
 				json_data = json.dumps( variable )
 				# ('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT, value TEXT)')
@@ -1147,11 +1204,11 @@ while True:
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
-		print(f"removed_nodes_tracker: {removed_nodes_tracker}\n\nflappy_nodes_tracker: {flappy_nodes_tracker}\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
+		print(f"removed_nodes_tracker: {removed_nodes_tracker}\nremoved_links_tracker: {removed_links_tracker}\nflappy_nodes_tracker: {flappy_nodes_tracker}\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
 		print(str(current_timestamp_ms))
 		if time_rollback_s != 0:
 			application_log.info(a_minute_ago_snapshot_URI)
-		application_log.info(f"removed_nodes_tracker: {removed_nodes_tracker}\n\nflappy_nodes_tracker: {flappy_nodes_tracker}\n\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n\n")
+		application_log.info(f"removed_nodes_tracker: {removed_nodes_tracker}\nremoved_links_tracker: {removed_links_tracker}\nflappy_nodes_tracker: {flappy_nodes_tracker}\n\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n\n")
 
 		diff_s = time.time() - start_time_s
 		sleep(60 - diff_s) # this keeps us roughly in-sync with the BIRD server's cron job
