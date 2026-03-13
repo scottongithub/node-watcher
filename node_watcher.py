@@ -1,16 +1,17 @@
-import json, logging, os, requests, sqlite3, time
+import json, logging, os, re, requests, sqlite3, time
 import datetime as dt
 from time import sleep
 
 
 # Node-Watcher is launched from node_watcher_launcher.sh, which provides the following environent variables
 try:
-  environment        = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
-  channel            = os.environ['SLACK_CHANNEL']
-  escalation_channel = os.environ['SLACK_ESCALATION_CHANNEL']
-  token              = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
-  thread_URI_prefix  = os.environ['SLACK_THREAD_URI_PREFIX']
-  BIRD_API_prefix    = os.environ['BIRD_API_PREFIX']
+  environment          = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
+  channel              = os.environ['SLACK_CHANNEL']
+  escalation_channel   = os.environ['SLACK_ESCALATION_CHANNEL']
+  token                = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
+	node_watcher_user_id = os.environ['NODE_WATCHER_USER_ID']
+  thread_URI_prefix    = os.environ['SLACK_THREAD_URI_PREFIX']
+  BIRD_API_prefix      = os.environ['BIRD_API_PREFIX']
   Node_Explorer_API_prefix = os.environ['NODE_EXPORER_API_PREFIX']
 except Exception as error:
   print("problem with importing an environment variable, make sure you run this from node_watcher_launcher.sh or node_watcher_launcher_dev.sh", error)
@@ -22,10 +23,11 @@ get_reactions_URI         = "https://slack.com/api/reactions.get"
 post_message_URI          = "https://slack.com/api/chat.postMessage"
 node_map_prefix           = "https://www.nycmesh.net/map/nodes/"
 conversations_replies_URI = "https://slack.com/api/conversations.replies"
+conversation_history_URI  = "https://slack.com/api/conversations.history"
 http_headers              = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
 
 
-# gonna split logging up between application and network so let's be fancy about it
+# gonna have a few different log files: application, node-level, link-level
 def setup_logger(name, log_file, log_level):
 	formatter = logging.Formatter('%(levelname)s %(message)s')
 	handler = logging.FileHandler(log_file)
@@ -42,18 +44,23 @@ def setup_logger(name, log_file, log_level):
 #####################
 
 
-alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
+
+node_down_threshold_ms       = 300000 # how long a node is observed to be down before it goes into alerting state
+link_down_threshold_ms       = 300000  # how long a link is observed to be down before it goes into alerting state
 hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
 hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
 hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
 hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
+read_channel_period_m        = 10     # how often the channel is polled for user input
+channel_lookback_m           = read_channel_period_m
+
 
 # different reactions can suppress alert message for different times - "suppress_duration_<slack's-name-of-reaction>_s"
-suppress_duration_DATE_s = 86400
+suppress_duration_DATE_s      = 86400
 suppress_duration_STOPWATCH_s = 10800
 
 # what hour/min the daily report goes out, 24h format, local time
-reporting_hour = 9
+reporting_hour   = 9
 reporting_minute = 0
 
 # how long before a down node is considered abandoned, and so removed from alerting and reporting, until it shows back up in the LSDB
@@ -72,20 +79,20 @@ use_database_persistence     = True   # persist app state in db - this used to b
 
 if environment == "prod":
 	log_level         = logging.INFO
-	application_log   = setup_logger('application_log', './node_watcher.log', log_level) # application-level logs
+	application_log   = setup_logger('application_log', './node_watcher.log', log_level)
 	node_changes_log  = setup_logger('node_changes_log', './node_changes.log', log_level)
 	link_changes_log  = setup_logger('link_changes_log', './link_changes.log', log_level)
 	node_watcher_db 	= "./node-watcher.db"
-	time_rollback_s   = 0      # time machine - leave as 0 in prod
+	time_rollback_s   = 0 # time machine - leave as 0 in prod
 
 
 if environment == "dev":
 	log_level         = logging.DEBUG
-	application_log   = setup_logger('application_log', './node_watcher_dev.log', log_level) # application-level logs
+	application_log   = setup_logger('application_log', './node_watcher_dev.log', log_level)
 	node_changes_log  = setup_logger('node_changes_log', './node_changes_dev.log', log_level)
 	link_changes_log  = setup_logger('link_changes_log', './link_changes_dev.log', log_level)
 	node_watcher_db 	= "./node-watcher-dev.db"
-	alert_time_threshold_ms      = 300000 # how long a node is observed to be down before it goes into alerting state
+	node_down_threshold_ms       = 300000 # how long a node is observed to be down before it goes into alerting state
 	hub_down_alert_time_ms       = 120000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
 	error_sleep_time_s           = 60     # how long the main loop waits to run again if there's an error 
 	hub_watcher_mode             = True   # can be disabled for troubleshooting
@@ -94,10 +101,13 @@ if environment == "dev":
 	hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
 	root_cause_guesser_timeout_s = 40     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
 	use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this file. will probably make this permanent soon
-	time_rollback_s              = 0      # time machine - good for replaying interesting events
 	reporting_hour               = 9
 	reporting_minute             = 1
 	flap_time_window_qty         = 6      # any state change, up or down, counts as 1
+	read_channel_period_m        = 1
+	channel_lookback_m           = read_channel_period_m
+	link_down_threshold_ms       = 60000
+	time_rollback_s              = 0      # time machine - good for replaying interesting events
 
 
 
@@ -136,7 +146,7 @@ db_conn.execute('CREATE TABLE IF NOT EXISTS slack_threads(node_ip TEXT, thread_t
 db_conn.execute('CREATE INDEX IF NOT EXISTS slack_threads_index ON slack_threads(node_ip)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS alert_messages(node_ip TEXT, thread_ts TEXT)')
 db_conn.execute('CREATE INDEX IF NOT EXISTS alert_messages_index ON alert_messages(node_ip)')
-db_conn.execute('CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )')
+db_conn.execute('CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT, advertised_router TEXT, metric INT, subscribers TEXT DEFAULT (json_array()) NOT NULL, UNIQUE(node_ip,advertised_router,metric))')
 db_conn.execute('CREATE INDEX IF NOT EXISTS subscriptions_index ON subscriptions(node_ip)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS node_state_changes(timestamp_ms INTEGER, router_id TEXT, state TEXT)')
 db_conn.execute('CREATE INDEX IF NOT EXISTS node_state_changes_index ON node_state_changes(timestamp_ms)')
@@ -293,7 +303,7 @@ def is_silenced( router_id ):
 	return False
 
 
-def get_subscribed_users( router_id ):
+def get_node_subscribers( router_id ):
 
 	subscribed_users = []
 	# First we check the node's thread (in case a user has put reaction there)
@@ -317,25 +327,27 @@ def get_subscribed_users( router_id ):
 
 			# Let's first update the subscriptions table to reflect all users' wishes
 			if reaction["name"] in ["heart", "hearts"]:
-				query = '''INSERT or IGNORE into subscriptions(node_ip) VALUES(?)'''
-				db_conn.execute(query, ( router_id, ))
+				# 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT, advertised_router TEXT, metric INT, subscribers TEXT DEFAULT (json_array()) NOT NULL, UNIQUE(node_ip,advertised_router,metric))')
+				query = '''INSERT or IGNORE into subscriptions(node_ip, advertised_router, metric) VALUES(?,?,?)'''
+				db_conn.execute(query, ( router_id, "none", -1, ))
 				for user in reaction["users"]:
-					# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
 					# All this fru-fru does is ensure that unique values get added to the array i.e. no duplicates
 					query = ''' UPDATE subscriptions
 								SET subscribers = (SELECT json_group_array(DISTINCT value) 
 								FROM (SELECT json_insert(subscribers,'$[#]', ?) 
 								AS tempArray), json_each(tempArray))
-								WHERE node_ip = ? '''
-					db_conn.execute(query, ( user, router_id, ))
+								WHERE node_ip = ?
+								AND advertised_router = ?
+								AND metric = ? '''
+					db_conn.execute(query, ( user, router_id, "none", -1, ))
 
 			if reaction["name"] == "broken_heart":
 				# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
 				# Just to avoid an error from someone mistakenly adding a broken heart when there are no subs for the node
-				query = '''INSERT or IGNORE into subscriptions(node_ip) VALUES(?)'''
-				db_conn.execute(query, ( router_id, ))
-				query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? '''
-				row = db_conn.execute(query, (router_id,))
+				query = '''INSERT or IGNORE into subscriptions(node_ip, advertised_router, metric) VALUES(?,?,?)'''
+				db_conn.execute(query, ( router_id, "none", -1, ))
+				query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'''
+				row = db_conn.execute(query, ( router_id, "none", -1, ))
 				row = row.fetchall()
 				if row:
 					subbed_users_in_db = json.loads(row[0][0])
@@ -346,8 +358,10 @@ def get_subscribed_users( router_id ):
 							rem_indx = subbed_users_in_db.index(user)
 							query = ''' UPDATE subscriptions
 										SET subscribers = json_remove(subscribers, '$[{}]')
-										WHERE node_ip = ? '''.format(rem_indx)  
-							db_conn.execute(query, (  router_id, ))
+										WHERE node_ip = ?
+										AND advertised_router = ?
+										AND metric = ?  '''.format(rem_indx)  
+							db_conn.execute(query, (  router_id, "none", -1, ))
 						except Exception as e:
 							application_log.error('Error', exc_info=e)
 
@@ -380,8 +394,8 @@ def get_subscribed_users( router_id ):
 
 				# Let's first update the subscriptions table to reflect all users' wishes
 				if reaction["name"] in ["heart", "hearts"]:
-					query = '''INSERT or IGNORE into subscriptions(node_ip) VALUES(?)'''
-					db_conn.execute(query, ( router_id, ))
+					query = '''INSERT or IGNORE into subscriptions(node_ip, advertised_router, metric) VALUES(?,?,?)'''
+					db_conn.execute(query, ( router_id, "none", -1, ))
 					for user in reaction["users"]:
 						# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
 						# All this fru-fru does is ensure that unique values get added to the array i.e. no duplicates
@@ -389,16 +403,18 @@ def get_subscribed_users( router_id ):
 									SET subscribers = (SELECT json_group_array(DISTINCT value) 
 									FROM (SELECT json_insert(subscribers,'$[#]', ?) 
 									AS tempArray), json_each(tempArray))
-									WHERE node_ip = ? '''
-						db_conn.execute(query, ( user, router_id, ))
+									WHERE node_ip = ?
+									AND advertised_router = ?
+									AND metric = ? '''
+						db_conn.execute(query, ( user, router_id, "none", -1, ))
 
 				if reaction["name"] == "broken_heart":
 					# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
 					# Just to avoid an error message from someone mistakenly adding a broken heart when there are no subs for the node
-					query = '''INSERT or IGNORE into subscriptions(node_ip) VALUES(?)'''
-					db_conn.execute(query, ( router_id, ))
-					query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? '''
-					row = db_conn.execute(query, (router_id,))
+					query = '''INSERT or IGNORE into subscriptions(node_ip, advertised_router, metric) VALUES(?,?,?)'''
+					db_conn.execute(query, ( router_id, "none", -1, ))
+					query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'''
+					row = db_conn.execute(query, ( router_id, "none", -1, ))
 					row = row.fetchall()
 					if row:
 						subbed_users_in_db = json.loads(row[0][0])
@@ -409,20 +425,22 @@ def get_subscribed_users( router_id ):
 								rem_indx = subbed_users_in_db.index(user)
 								query = ''' UPDATE subscriptions
 											SET subscribers = json_remove(subscribers, '$[{}]')
-											WHERE node_ip = ? '''.format(rem_indx)  
-								db_conn.execute(query, (  router_id, ))
+											WHERE node_ip = ?
+											AND advertised_router = ?
+											AND metric = ?  '''.format(rem_indx)  
+								db_conn.execute(query, (  router_id, "none", -1, ))
 							except Exception as e:
 								application_log.error('Error', exc_info=e)
 
 			conn.commit()
 
 	# now that the db should reflect all users' current wishes, we read from it and report subscriptions
-	query = ('SELECT EXISTS(SELECT subscribers FROM subscriptions WHERE node_ip = ?)')
-	subscribers_field_exists = db_conn.execute(query, ( router_id, ))
+	query = ('SELECT EXISTS(SELECT subscribers FROM subscriptions WHERE node_ip = ? AND advertised_router = ? AND metric = ?)')
+	subscribers_field_exists = db_conn.execute(query, ( router_id, "none", -1, ))
 	subscribers_field_exists = subscribers_field_exists.fetchall()
 	if subscribers_field_exists[0][0]:
-		query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? '''
-		row = db_conn.execute(query, (router_id, ))
+		query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'''
+		row = db_conn.execute(query, (router_id, "none", -1, ))
 		row = row.fetchall()
 		if row:
 			subbed_users_in_db = json.loads(row[0][0])
@@ -438,8 +456,11 @@ def get_subscribed_users( router_id ):
 ################
 
 
-def get_downtime_humanized( router_id, threshold_ms=None ):
-	down_time_m = int(((current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"])) / 60000)
+def get_downtime_humanized( router_or_link_id, threshold_ms=None, type="router" ):
+	if type == "router":
+		down_time_m = int(((current_timestamp_ms - removed_nodes_tracker[router_or_link_id]["timestamp"])) / 60000)
+	elif type == "link":
+		down_time_m = int(((current_timestamp_ms - removed_links_tracker[router_or_link_id]["timestamp"])) / 60000)
 	# doing this to make things look cleaner from rounding, at the cost of a bit of accuracy
 	if threshold_ms is not None:
 		alert_threshold_m = round(threshold_ms / 60000) 
@@ -455,6 +476,7 @@ def get_downtime_humanized( router_id, threshold_ms=None ):
 		down_time_d = round((down_time_m / 1440), 1)
 		downtime_humanized = str(down_time_d) + " days"
 	return ( downtime_humanized )
+
 
 
 def IP_to_NN( IP ):
@@ -562,6 +584,131 @@ def get_link_name( advertising_router, ospf_link_json):
 	link_name = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
 	return(link_name)
 
+def select_ts(message):
+	# print(message)
+	return(messages[message]["ts"])
+
+def get_subscriptions( user_id ):
+	query = "SELECT node_ip, advertised_router, metric from subscriptions where subscribers LIKE '%'||?||'%'"
+	nodes = db_conn.execute(query, ( user_id, ))
+	nodes = nodes.fetchall()
+	subscriptions = []
+	for node in nodes:
+		subscriptions.append( node[0])
+	# print(nodes)
+	return( nodes )
+
+def get_channel_messages( channel_lookback_m ):
+	messages = {}
+	response = requests.get(conversation_history_URI, headers=http_headers, params={	"channel": channel, "oldest": str(int(time.time() - (channel_lookback_m * 60)))})
+	json_data = response.json()
+	# print(json.dumps(json_data, indent=2))
+	for message in json_data["messages"]:
+		# print(message)
+		# print(message["user"])
+		if message["user"] != node_watcher_user_id:
+			# print(message["client_msg_id"] + message["user"]+ message["ts"] + message["text"])
+			messages[message["client_msg_id"]] = {"ts": message["ts"], "user": message["user"], "text":message["text"] }
+	
+	return(messages)
+
+def is_valid_ip( ip_candidate ):
+  ip_regex = r"^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$"
+  if(re.search(ip_regex, ip_candidate)): 
+    return(True)
+
+def subscribe_user( sub_dict ):
+	try:
+		query = '''INSERT or IGNORE into subscriptions(node_ip,advertised_router,metric) VALUES(?,?,?)'''
+		db_conn.execute(query, ( sub_dict["node_ip"], sub_dict["advertised_router"], sub_dict["metric"], ))
+		# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
+		# All this fru-fru does is ensure that unique values get added to the array i.e. no duplicates
+		query = ''' UPDATE subscriptions
+					SET subscribers = (SELECT json_group_array(DISTINCT value) 
+					FROM (SELECT json_insert(subscribers,'$[#]', ?) 
+					AS tempArray), json_each(tempArray))
+					WHERE node_ip = ?
+					AND advertised_router = ?
+					AND metric = ?'''
+		db_conn.execute(query, ( sub_dict["user_id"], sub_dict["node_ip"], sub_dict["advertised_router"], sub_dict["metric"], ))
+		conn.commit()
+	except Exception as e:
+		print(e)
+		pass
+
+def unsubscribe_user( unsub_dict ):
+	# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
+	query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'''
+	row = db_conn.execute(query, (unsub_dict["node_ip"],unsub_dict["advertised_router"], unsub_dict["metric"],))
+	row = row.fetchall()
+	if row:
+		subbed_users_in_db = json.loads(row[0][0])
+	try:
+		rem_indx = subbed_users_in_db.index(unsub_dict["user_id"])
+		query = ''' UPDATE subscriptions
+					SET subscribers = json_remove(subscribers, '$[{}]')
+					WHERE node_ip = ?
+					AND advertised_router = ?
+					AND metric = ?'''.format(rem_indx)  
+		db_conn.execute(query, (  unsub_dict["node_ip"],unsub_dict["advertised_router"], unsub_dict["metric"], ))
+	except Exception as e:
+		print(e)
+		pass
+	conn.commit()
+
+def get_link_name( advertising_router, ospf_link_json):
+	link_name = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
+	return(link_name)
+
+
+def link_has_subscribers( link_id ):
+	link_list = link_id.split("__")
+	# 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT, advertised_router TEXT, metric INT, subscribers TEXT DEFAULT (json_array()) NOT NULL, UNIQUE(node_ip,advertised_router,metric))'
+	query = "SELECT subscribers from subscriptions where node_ip = ? and advertised_router = ? and metric = ?"
+	subscribers_json = db_conn.execute(query, ( link_list[0], link_list[1], link_list[2], ))
+	subscribers_json = subscribers_json.fetchall()
+	# print(f'\n\n\n{subscribers_json}\n\n\n')
+	if subscribers_json:
+		print(f"yes subs {link_id}")
+		return(True)
+	else:
+		print(f"no subs {link_id}")
+		return(False)
+
+def post_subscriptions( subscriptions, thread_ts ):
+	body = "you are subscribed to:"
+	body += "\n```NODE_ID     ADVERTISED ROUTER    METRIC\n"
+	for subscription in subscriptions:
+		body += f'\n{subscription[0].ljust(16, " ")} {subscription[1].ljust(16, " ")} {str(subscription[2]).ljust(6, " ")}'
+	body += "```"	
+	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
+
+def get_link_subscribers( link_list ):
+	link_subscribers = []
+	query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'''
+	row = db_conn.execute(query, (link_list[0], link_list[1], link_list[2], ))
+	row = row.fetchall()
+	if row:
+		subbed_users_in_db = json.loads(row[0][0])
+		for subbed_user_in_db in subbed_users_in_db:
+			link_subscribers.append( subbed_user_in_db )
+
+	return( link_subscribers )
+
+
+def post_router_adverts( router_id, deserialized_json_2, thread_ts ):
+	try:
+		body = "   NODE_ID  ADVERTISED_ROUTER  METRIC\n         (for easy copy-paste)\n"
+		if 'router' in deserialized_json_2['areas']['0.0.0.0']['routers'][router_id]['links']:
+			for advertised_router in deserialized_json_2['areas']['0.0.0.0']['routers'][router_id]['links']['router']:
+				body += f'sub {router_id} {advertised_router["id"]} {advertised_router["metric"]}\n'
+	except Exception as e:
+		application_log.error('Error', exc_info=e)
+		print(e)
+		body = "oops something went wrong with router id lookup\ncould be due to no advertised routers for this node"
+	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
 
 
 #####################
@@ -573,6 +720,7 @@ while True:
 
 	# this will keep us roughly in-sync with the BIRD server's cron job
 	start_time_s = time.time()
+	current_timestamp_ms = int( time.time() * 1000 ) - int( time_rollback_s * 1000 )
 
 	try:
 
@@ -623,11 +771,12 @@ while True:
 						try:
 							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']['router']:
 								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)'
-								print(f'{advertised_router}\nremoved')
-								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "up")'
+								# print(f'{advertised_router}\nremoved')
+								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "down")'
 								db_conn.execute(query, (current_timestamp_ms, router, advertised_router['id'], advertised_router['metric'], ))
 								link_name = get_link_name(router, advertised_router)
-								recently_removed_links.append(link_name)
+								recently_removed_links.append(link_name)							
+								link_changes_log.info(f'{link_name.ljust(32, " ")}  --DOWN--    {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime("%Y-%m-%d %H:%M")}')
 						except Exception as e:
 							print(e)
 							pass
@@ -638,11 +787,12 @@ while True:
 						try:
 							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']['router']:
 								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)'
-								print(f'{advertised_router}\nadded')
-								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "down")'
+								# print(f'{advertised_router}\nadded')
+								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "up")'
 								db_conn.execute(query, (current_timestamp_ms, router, advertised_router['id'], advertised_router['metric'], ))
 								link_name = get_link_name(router, advertised_router)
 								recently_added_links.append(link_name)
+								link_changes_log.info(f'{link_name.ljust(32, " ")}  --UP--      {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime("%Y-%m-%d %H:%M")}') #'   downtime: {get_downtime_humanized(link_name)}')
 						except Exception as e:
 							print(e)
 							pass
@@ -651,12 +801,14 @@ while True:
 			print(e)
 			pass
 
+
+
 		################################
 		#####  LOGIC AND ALERTING  #####
 		################################
 
 
-		current_timestamp_ms = int( time.time() * 1000 ) - int( time_rollback_s * 1000 )
+		# current_timestamp_ms = int( time.time() * 1000 ) - int( time_rollback_s * 1000 )
 		application_log.info(f"{current_timestamp_ms} {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime('%Y-%m-%d %H:%M:%S')}")
 
 		# Get all changes into db, _then_ filter
@@ -710,7 +862,7 @@ while True:
 					application_log.info(f"{router_id} downtime: {get_downtime_humanized( router_id )}")
 
 					# Get reactions and update subscribed users, before the previous alert message is deleted
-					subscribed_users = get_subscribed_users( router_id )
+					subscribed_users = get_node_subscribers( router_id )
 					application_log.info(f"subscribed users: {str(subscribed_users)}" )
 
 					# Delete previous alert message in channel, if exists
@@ -817,9 +969,58 @@ while True:
 				if link_id in removed_links_tracker and removed_links_tracker[link_id]["alerting"] == False:
 					removed_links_tracker.pop(link_id)
 				elif link_id in removed_links_tracker and removed_links_tracker[link_id]["alerting"] == True:
-					# print(f"{link_id} downtime: {get_downtime_humanized( link_id )}")
-					link_changes_log.info(f'{link_id.ljust(32, " ")}  --UP--      {dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")}   downtime: {get_downtime_humanized(link_id)}')
+					link_list = link_id.split("__")
+					router_id = link_list[0]
+					subscribed_users = get_link_subscribers( link_list )
+					application_log.info(f"{link_id} downtime: {get_downtime_humanized( link_id, None, "link" )}")
+					application_log.info(f"link subs: {str(subscribed_users)}" )
+
+					# Delete previous alert message in channel, if exists
+					query = ('SELECT EXISTS(SELECT * FROM alert_messages WHERE node_ip = ?)')
+					last_message_exists = db_conn.execute(query, ( router_id, ))
+					last_message_exists = last_message_exists.fetchall()
+					if last_message_exists[0][0]:
+						query = 'SELECT * FROM alert_messages WHERE node_ip = ?'
+						row = db_conn.execute(query, (router_id,))
+						row = row.fetchall()
+						thread_ts = row[0][1]
+						response = requests.post(delete_message_URI, headers=http_headers, data=json.dumps({ "channel": channel, "ts": thread_ts}))																												
+						query = 'DELETE FROM alert_messages WHERE node_ip = ?'
+						db_conn.execute(query, (router_id,))
+
+					# Post message to the node's existing thread
+					# No need to check if thread exists because it is coming out of alerting
+					query     = 'SELECT * FROM slack_threads WHERE node_ip = ?'
+					row       = db_conn.execute(query, (router_id,))
+					row       = row.fetchall()
+					thread_ts = row[0][1]
+					body      = (":point_up: :link:")
+					body 			+= link_id + " is up! Downtime " + get_downtime_humanized( link_id, None, "link" )
+					response  = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
+					# Get timestamp from the post above - to be added to main thread message as a link
+					json_data       = response.json()
+					thread_ts       = json_data["message"]["thread_ts"]
+					latest_post_ts  = json_data["message"]["ts"]
+					latest_post_URI = thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
+
+					# Post alert message to main channel
+					# application_log.info( "is silenced: " )
+					# application_log.info( str(is_silenced( router_id ) ))
+					body = node_up_emoji + " :link: "
+					body += link_id + " is up! Downtime " + get_downtime_humanized( link_id, None, "link" ) + " <" + latest_post_URI + "|node history>"
+					for user_id in subscribed_users:
+						body += " <@" + user_id + "> "						
+					application_log.debug(f"node up body: {body}")			
+					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
+
+					# Get timestamp of main-channel message - to delete it later when new alert goes out
+					json_data = response.json()
+					thread_ts = json_data["ts"]
+					query = 'INSERT into alert_messages(node_ip, thread_ts) VALUES(?,?)'
+					db_conn.execute(query, (router_id, thread_ts, ))
 					removed_links_tracker.pop(link_id)
+
 
 		if recently_removed_nodes:
 
@@ -842,12 +1043,22 @@ while True:
 					removed_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : False}
 
 
+
+
+		if recently_removed_links:
+			for link_id in recently_removed_links:
+				if link_has_subscribers( link_id ):
+					removed_links_tracker[link_id] = {"timestamp" : current_timestamp_ms, "alerting" : False}
+
+
+
+
 		if removed_nodes_tracker:
 
 			hub_down_nodes_current = []
 			for router_id in removed_nodes_tracker:	
 
-				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > alert_time_threshold_ms \
+				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > node_down_threshold_ms \
 				and removed_nodes_tracker[router_id]["alerting"] == False \
 				and "hub_down_group" not in removed_nodes_tracker[router_id] \
 				and is_silenced( router_id ) == False:
@@ -858,7 +1069,7 @@ while True:
 
 					if thread_exists[0][0]:						
 						# Get reactions and update subscribed users before the last alert message is deleted
-						subscribed_users = get_subscribed_users( router_id )
+						subscribed_users = get_node_subscribers( router_id )
 						application_log.info(f"subscribed users: {str(subscribed_users)}")
 
 						# Delete previous alert message
@@ -886,7 +1097,7 @@ while True:
 						body = (":point_down: ")
 						if router_id in flappy_nodes:
 							body += flap_emoji + " "
-						body += router_id + " has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms )
+						body += router_id + " has been down " + get_downtime_humanized( router_id, node_down_threshold_ms )
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 						# Get timestamp from the post above - to be added to main channel message as a link
@@ -901,7 +1112,7 @@ while True:
 						if router_id in flappy_nodes:
 							body += " " + flap_emoji
 							flappy_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : True}
-						body += router_id + " has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms ) + " <" + latest_post_URI + "|node history>"
+						body += router_id + " has been down " + get_downtime_humanized( router_id, node_down_threshold_ms ) + " <" + latest_post_URI + "|node history>"
 						for user_id in subscribed_users:
 							body += " <@" + user_id + "> "
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
@@ -913,7 +1124,7 @@ while True:
 						db_conn.execute(query, (router_id, thread_ts, ))
 
 					else:
-						body = (":thread: *" + router_id + "* has been down " + get_downtime_humanized( router_id, alert_time_threshold_ms ))
+						body = (":thread: *" + router_id + "* has been down " + get_downtime_humanized( router_id, node_down_threshold_ms ))
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
 						json_data = response.json()
 						thread_ts = json_data["ts"]
@@ -1020,6 +1231,82 @@ while True:
 									body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of nodes that are still down in this outage>"
 									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
+
+
+		if removed_links_tracker:
+			for link_id in removed_links_tracker:
+				if current_timestamp_ms - removed_links_tracker[link_id]["timestamp"] > link_down_threshold_ms \
+				and removed_links_tracker[link_id]["alerting"] == False:
+					link_list = link_id.split("__")
+					router_id = link_list[0]
+					subscribed_users = get_link_subscribers( link_list )
+					query = ('SELECT EXISTS(SELECT * FROM slack_threads WHERE node_ip = ?)')
+					thread_exists = db_conn.execute(query, ( router_id,))
+					thread_exists = thread_exists.fetchall()
+					if thread_exists[0][0]:						
+
+						# Delete previous alert message
+						# The last alert message (in the channel) should always exist if the thread exists, but
+						# this hasn't always been the case, as the clean-up functionality was added after the
+						# app had been running for some time. The check avoids errors from the earlier versions,
+						# and can be eliminated if the App is going into a new Slack channel
+						query = ('SELECT EXISTS(SELECT * FROM alert_messages WHERE node_ip = ?)')
+						last_message_exists = db_conn.execute(query, ( router_id, ))
+						last_message_exists = last_message_exists.fetchall()
+						if last_message_exists[0][0]:
+							query = 'SELECT * FROM alert_messages WHERE node_ip = ?'
+							row = db_conn.execute(query, (router_id, ))
+							row = row.fetchall()
+							thread_ts = row[0][1]
+							response = requests.post(delete_message_URI, headers=http_headers, data=json.dumps({ "channel": channel, "ts": thread_ts}))																												
+							query = 'DELETE FROM alert_messages WHERE node_ip = ?'
+							db_conn.execute(query, (router_id, ))
+
+						# Post message to the node's history thread
+						query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
+						row = db_conn.execute(query, (router_id, ))
+						row = row.fetchall()
+						thread_ts = row[0][1]
+						body = (":point_down: :link: ")
+						if router_id in flappy_nodes:
+							body += flap_emoji + " "
+						body += link_id + " has been down " + get_downtime_humanized( link_id, None, "link" )
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
+						# Get timestamp from the post above - to be added to main channel message as a link
+						json_data = response.json()
+						thread_ts = json_data["message"]["thread_ts"]
+						latest_post_ts = json_data["message"]["ts"]
+						latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
+
+						# Post message to main channel
+						# application_log.debug(f"{router_id} is silenced: {str(is_silenced(router_id))}")
+						body = node_down_emoji + " :link: "
+						body += link_id + " has been down " + get_downtime_humanized( link_id, None, "link" ) + " <" + latest_post_URI + "|node history>"
+						for user_id in subscribed_users:
+							body += " <@" + user_id + "> "
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
+
+						# Get timestamp of main-channel message - to delete it later when a new alert goes out
+						json_data = response.json()
+						thread_ts = json_data["ts"]
+						query = 'INSERT into alert_messages(node_ip, thread_ts) VALUES(?,?)'
+						db_conn.execute(query, (router_id, thread_ts, ))
+
+					else:
+						body = (":thread: :link:*" + link_list[0] + "*: link " + link_id + " has been down " + get_downtime_humanized( link_id, None, "link" ))
+						for user_id in subscribed_users:
+							body += " <@" + user_id + "> "
+						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
+						json_data = response.json()
+						thread_ts = json_data["ts"]
+						query = 'INSERT into slack_threads(node_ip, thread_ts) VALUES(?,?)'
+						db_conn.execute(query, (router_id, thread_ts, ))
+
+					removed_links_tracker[link_id]["alerting"] = True
+
+
+
 		conn.commit()
 
 
@@ -1043,7 +1330,7 @@ while True:
 
 					if thread_exists[0][0]:						
 						# Get reactions and update subscribed users before the last alert message is deleted
-						subscribed_users = get_subscribed_users( router_id )
+						subscribed_users = get_node_subscribers( router_id )
 						application_log.info(f"subscribed users: {str(subscribed_users)}")
 
 						# Delete previous alert message
@@ -1204,6 +1491,94 @@ while True:
 				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
+
+		################################
+		#####   READ THE CHANNEL   #####
+		################################
+
+
+		if dt.datetime.today().minute % read_channel_period_m == 0:
+			messages = get_channel_messages( channel_lookback_m )
+			sorted_messages = sorted(messages, key=select_ts)
+			for message in sorted_messages:
+				user_text = messages[message]["text"]
+				user_text_list = user_text.split(" ")
+				# print(user_text_list)
+				input_is_valid = False
+				thread_ts = messages[message]["ts"]
+				user_id = messages[message]["user"]
+				subscriptions = get_subscriptions( user_id )
+				if user_text in ["show subscriptions", "Show subscriptions", "show subs", "Show subs"]:
+					input_is_valid = True
+					post_subscriptions( subscriptions, thread_ts )
+
+				if user_text_list[0] in ["show", "Show"] and user_text_list[1] == "router" and is_valid_ip(user_text_list[2]):
+					input_is_valid = True
+					post_router_adverts( user_text_list[2], deserialized_json_2, thread_ts )
+				
+				elif user_text_list[0] in ["subscribe", "Subscribe", "sub", "Sub"]:
+					if is_valid_ip(user_text_list[1]):
+						try:
+							if len(user_text_list) == 2:
+								input_is_valid = True
+								sub_dict = {"node_ip": user_text_list[1], "advertised_router": "none", "metric": -1, "user_id": user_id}
+								subscribe_user( sub_dict )
+								post_subscriptions( get_subscriptions( user_id ), thread_ts )
+							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
+								input_is_valid = True
+								temp_dict = {"id": user_text_list[2], "metric": "all"}
+								link_name = get_link_name( user_text_list[1], temp_dict )
+								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
+								subscribe_user( sub_dict )
+								post_subscriptions( get_subscriptions( user_id ), thread_ts )
+							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[2]) and 0 <= int(user_text_list[3]) <= 10000:
+								input_is_valid = True
+								temp_dict = {"id": user_text_list[2], "metric": int(user_text_list[3])}
+								link_name = get_link_name( user_text_list[1], temp_dict )
+								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
+								subscribe_user( sub_dict )
+								post_subscriptions( get_subscriptions( user_id), thread_ts )
+						except Exception as e:
+							application_log.error(f"line 1542: {e}")
+							print(e)
+							pass
+
+
+				elif user_text_list[0] in ["unsubscribe", "unsub"]:
+					if is_valid_ip(user_text_list[1]):
+						try:
+							if len(user_text_list) == 2:
+								input_is_valid = True
+								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": "none", "metric": -1, "user_id": user_id}
+								unsubscribe_user( unsub_dict )
+								post_subscriptions( get_subscriptions( user_id), thread_ts )
+							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
+								input_is_valid = True
+								temp_dict = {"id": user_text_list[2], "metric": "all"}
+								link_name = get_link_name( user_text_list[1], temp_dict )
+								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
+								unsubscribe_user( unsub_dict )
+								post_subscriptions( get_subscriptions( user_id ), thread_ts )
+							elif len(user_text_list) == 4 and 0 <= int(user_text_list[3]) <= 10000:
+								input_is_valid = True
+								temp_dict = {"id": user_text_list[2], "metric": int(user_text_list[3])}
+								link_name = get_link_name( user_text_list[1], temp_dict )
+								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
+								unsubscribe_user( unsub_dict )
+								post_subscriptions( get_subscriptions( user_id), thread_ts )
+						except Exception as e:
+							application_log.error(f"line 1569: {e}")
+							print(e)
+							pass
+
+				if not input_is_valid:
+					body = "invalid input bro\noptions are `show subscriptions|subs`, `show router <router id>`, `subscribe|sub <router id>`, `unsubscribe|unsub <router id>`"
+					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
+
+
+
+
 		print(f"removed_nodes_tracker: {removed_nodes_tracker}\nremoved_links_tracker: {removed_links_tracker}\nflappy_nodes_tracker: {flappy_nodes_tracker}\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
 		print(str(current_timestamp_ms))
 		if time_rollback_s != 0:
@@ -1212,6 +1587,9 @@ while True:
 
 		diff_s = time.time() - start_time_s
 		sleep(60 - diff_s) # this keeps us roughly in-sync with the BIRD server's cron job
+
+
+
 
 			
 	except Exception as e:

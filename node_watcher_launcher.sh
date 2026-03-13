@@ -9,6 +9,9 @@ export SLACK_CHANNEL
 SLACK_ESCALATION_CHANNEL="<your_slack_escalations_channel>"
 export SLACK_ESCALATION_CHANNEL
 
+NODE_WATCHER_USER_ID="<slack-uid>"
+export NODE_WATCHER_USER_ID
+
 SLACK_THREAD_URI_PREFIX="https://<your_organization>.slack.com/archives/"
 export SLACK_THREAD_URI_PREFIX
 
