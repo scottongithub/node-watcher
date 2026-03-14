@@ -9,7 +9,7 @@ try:
   channel              = os.environ['SLACK_CHANNEL']
   escalation_channel   = os.environ['SLACK_ESCALATION_CHANNEL']
   token                = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
-	node_watcher_user_id = os.environ['NODE_WATCHER_USER_ID']
+  node_watcher_user_id = os.environ['NODE_WATCHER_USER_ID']
   thread_URI_prefix    = os.environ['SLACK_THREAD_URI_PREFIX']
   BIRD_API_prefix      = os.environ['BIRD_API_PREFIX']
   Node_Explorer_API_prefix = os.environ['NODE_EXPORER_API_PREFIX']
@@ -697,7 +697,7 @@ def get_link_subscribers( link_list ):
 	return( link_subscribers )
 
 
-def post_router_adverts( router_id, deserialized_json_2, thread_ts ):
+def post_router_adverts( router_id, thread_ts ):
 	try:
 		body = "   NODE_ID  ADVERTISED_ROUTER  METRIC\n         (for easy copy-paste)\n"
 		if 'router' in deserialized_json_2['areas']['0.0.0.0']['routers'][router_id]['links']:
@@ -1501,20 +1501,18 @@ while True:
 			messages = get_channel_messages( channel_lookback_m )
 			sorted_messages = sorted(messages, key=select_ts)
 			for message in sorted_messages:
-				user_text = messages[message]["text"]
-				user_text_list = user_text.split(" ")
-				# print(user_text_list)
 				input_is_valid = False
-				thread_ts = messages[message]["ts"]
-				user_id = messages[message]["user"]
-				subscriptions = get_subscriptions( user_id )
+				thread_ts      = messages[message]["ts"]
+				user_id        = messages[message]["user"]
+				user_text      = messages[message]["text"]
+				user_text_list = user_text.split(" ")
 				if user_text in ["show subscriptions", "Show subscriptions", "show subs", "Show subs"]:
 					input_is_valid = True
-					post_subscriptions( subscriptions, thread_ts )
+					post_subscriptions( get_subscriptions( user_id ), thread_ts )
 
 				if user_text_list[0] in ["show", "Show"] and user_text_list[1] == "router" and is_valid_ip(user_text_list[2]):
 					input_is_valid = True
-					post_router_adverts( user_text_list[2], deserialized_json_2, thread_ts )
+					post_router_adverts( user_text_list[2], thread_ts )
 				
 				elif user_text_list[0] in ["subscribe", "Subscribe", "sub", "Sub"]:
 					if is_valid_ip(user_text_list[1]):
@@ -1526,20 +1524,16 @@ while True:
 								post_subscriptions( get_subscriptions( user_id ), thread_ts )
 							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
 								input_is_valid = True
-								temp_dict = {"id": user_text_list[2], "metric": "all"}
-								link_name = get_link_name( user_text_list[1], temp_dict )
 								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
 								subscribe_user( sub_dict )
 								post_subscriptions( get_subscriptions( user_id ), thread_ts )
 							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[2]) and 0 <= int(user_text_list[3]) <= 10000:
 								input_is_valid = True
-								temp_dict = {"id": user_text_list[2], "metric": int(user_text_list[3])}
-								link_name = get_link_name( user_text_list[1], temp_dict )
 								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
 								subscribe_user( sub_dict )
 								post_subscriptions( get_subscriptions( user_id), thread_ts )
 						except Exception as e:
-							application_log.error(f"line 1542: {e}")
+							application_log.error(f"line 1536: {e}")
 							print(e)
 							pass
 
@@ -1554,20 +1548,16 @@ while True:
 								post_subscriptions( get_subscriptions( user_id), thread_ts )
 							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
 								input_is_valid = True
-								temp_dict = {"id": user_text_list[2], "metric": "all"}
-								link_name = get_link_name( user_text_list[1], temp_dict )
 								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
 								unsubscribe_user( unsub_dict )
 								post_subscriptions( get_subscriptions( user_id ), thread_ts )
-							elif len(user_text_list) == 4 and 0 <= int(user_text_list[3]) <= 10000:
+							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[2]) and 0 <= int(user_text_list[3]) <= 10000:
 								input_is_valid = True
-								temp_dict = {"id": user_text_list[2], "metric": int(user_text_list[3])}
-								link_name = get_link_name( user_text_list[1], temp_dict )
 								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
 								unsubscribe_user( unsub_dict )
 								post_subscriptions( get_subscriptions( user_id), thread_ts )
 						except Exception as e:
-							application_log.error(f"line 1569: {e}")
+							application_log.error(f"line 1560: {e}")
 							print(e)
 							pass
 
