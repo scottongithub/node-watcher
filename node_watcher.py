@@ -5,26 +5,26 @@ from time import sleep
 
 # Node-Watcher is launched from node_watcher_launcher.sh, which provides the following environent variables
 try:
-  environment          = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
-  channel              = os.environ['SLACK_CHANNEL']
-  escalation_channel   = os.environ['SLACK_ESCALATION_CHANNEL']
-  token                = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
-  node_watcher_user_id = os.environ['NODE_WATCHER_USER_ID']
-  thread_URI_prefix    = os.environ['SLACK_THREAD_URI_PREFIX']
-  BIRD_API_prefix      = os.environ['BIRD_API_PREFIX']
+  environment              = os.environ['NODE_WATCHER_ENVIRONMENT'] # "dev" or "prod"
+  channel                  = os.environ['SLACK_CHANNEL']
+  escalation_channel       = os.environ['SLACK_ESCALATION_CHANNEL']
+  token                    = os.environ['NODE_WATCHER_TOKEN'] # pasted by user into launcher script
+  node_watcher_user_id     = os.environ['NODE_WATCHER_USER_ID']
+  thread_URI_prefix        = os.environ['SLACK_THREAD_URI_PREFIX']
+  BIRD_API_prefix          = os.environ['BIRD_API_PREFIX']
   Node_Explorer_API_prefix = os.environ['NODE_EXPORER_API_PREFIX']
 except Exception as error:
   print("problem with importing an environment variable, make sure you run this from node_watcher_launcher.sh or node_watcher_launcher_dev.sh", error)
   exit(1)
 
 
-delete_message_URI        = "https://slack.com/api/chat.delete"
-get_reactions_URI         = "https://slack.com/api/reactions.get"
-post_message_URI          = "https://slack.com/api/chat.postMessage"
-node_map_prefix           = "https://www.nycmesh.net/map/nodes/"
-conversations_replies_URI = "https://slack.com/api/conversations.replies"
-conversation_history_URI  = "https://slack.com/api/conversations.history"
-http_headers              = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
+delete_message_URI         = "https://slack.com/api/chat.delete"
+get_reactions_URI          = "https://slack.com/api/reactions.get"
+post_message_URI           = "https://slack.com/api/chat.postMessage"
+node_map_prefix            = "https://www.nycmesh.net/map/nodes/"
+conversations_replies_URI  = "https://slack.com/api/conversations.replies"
+conversation_history_URI   = "https://slack.com/api/conversations.history"
+http_headers               = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
 
 
 # gonna have a few different log files: application, node-level, link-level
@@ -69,6 +69,8 @@ abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
 # a node is considered to be flappy if it meets or exceeds `flap_time_window_qty` inside of `flap_time_window_hrs`
 flap_time_window_hrs = 24
 flap_time_window_qty = 12  # any state change, up or down, counts as 1
+link_flap_time_window_hrs = 24
+link_flap_time_window_qty = 12
 flap_emoji = ":wackywavinginflatablearmman:"
 
 error_sleep_time_s           = 10     # how long the main loop waits to run again if there's an error
@@ -150,13 +152,13 @@ db_conn.execute('CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT, advertis
 db_conn.execute('CREATE INDEX IF NOT EXISTS subscriptions_index ON subscriptions(node_ip)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS node_state_changes(timestamp_ms INTEGER, router_id TEXT, state TEXT)')
 db_conn.execute('CREATE INDEX IF NOT EXISTS node_state_changes_index ON node_state_changes(timestamp_ms)')
-db_conn.execute('CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)')
+db_conn.execute('CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, advertised_router TEXT, metric INT, state TEXT)')
 db_conn.execute('CREATE INDEX IF NOT EXISTS link_state_changes_index ON node_state_changes(timestamp_ms)')
 db_conn.execute('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT PRIMARY KEY, value TEXT)')
 conn.commit()
 
 
-# removed nodes and their timers are tracked here. this is just to initialize - you can override the db below 
+# initialize trackers - you can override the db below 
 removed_nodes_tracker = {}
 removed_links_tracker = {}
 flappy_nodes_tracker = {}
@@ -478,7 +480,6 @@ def get_downtime_humanized( router_or_link_id, threshold_ms=None, type="router" 
 	return ( downtime_humanized )
 
 
-
 def IP_to_NN( IP ):
 	NN = None
 	if IP.startswith("10.69"):
@@ -520,19 +521,14 @@ def get_closest_common_upstream( node_list, before_outage_timestamp ):
 			application_log.debug(f"Node explorer params: {params}")
 			response = requests.get(Node_Explorer_URI, params=params)
 			json_data = response.json()
-
 			for node in json_data["nodes"]:			
 				if node["id"] == router_id:
 					exit_path_nodes = node["exit_paths"]["outbound"]
-
 					for exit_path_node in exit_path_nodes:
 						outage_exit_nodes.append(exit_path_node[0])
-
 					application_log.debug(f"get_closest_common_upstream: node: {router_id} exit path: {exit_path_nodes}")
-
 		except Exception as e:
 			application_log.error(f"get_closest_common_upstream: Error with {router_id}: {e}")
-
 	return( most_frequent_and_closest( outage_exit_nodes ))
 
 
@@ -558,35 +554,24 @@ def get_node_webmap_URI( nodes_to_be_mapped ):
 	return( node_map_URI )
 
 
-def get_flappy_nodes( current_timestamp_ms ):
-	beginning_of_window = current_timestamp_ms - ( flap_time_window_hrs * 3600000 )
-	query = 'SELECT DISTINCT router_id FROM node_state_changes WHERE timestamp_ms BETWEEN ? AND ?'
-	row = db_conn.execute(query, (beginning_of_window, current_timestamp_ms, ))
-	row = row.fetchall()
-	flappy_nodes_unfiltered = []
-	for router_id in row:
-		query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
-		row = db_conn.execute(query, (router_id[0], beginning_of_window, current_timestamp_ms, ))
-		row = row.fetchall()
-		if row[0][0] >= flap_time_window_qty:
-			flappy_nodes_unfiltered.append( router_id[0] )			
-	return( flappy_nodes_unfiltered )
 
 
-def get_flap_qty( router_id, end_of_window_ms ):
-	beginning_of_window = end_of_window_ms - ( flap_time_window_hrs * 3600000 )
-	query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
-	row = db_conn.execute(query, (router_id, beginning_of_window, end_of_window_ms, ))
-	row = row.fetchall()
-	return(row[0][0])
+# def get_flap_qty( router_id, end_of_window_ms ):
+# 	beginning_of_window = end_of_window_ms - ( flap_time_window_hrs * 3600000 )
+# 	query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
+# 	row = db_conn.execute(query, (router_id, beginning_of_window, end_of_window_ms, ))
+# 	row = row.fetchall()
+# 	return(row[0][0])
 
-def get_link_name( advertising_router, ospf_link_json):
+
+def get_link_id( advertising_router, ospf_link_json):
 	link_name = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
 	return(link_name)
 
+
 def select_ts(message):
-	# print(message)
 	return(messages[message]["ts"])
+
 
 def get_subscriptions( user_id ):
 	query = "SELECT node_ip, advertised_router, metric from subscriptions where subscribers LIKE '%'||?||'%'"
@@ -598,6 +583,7 @@ def get_subscriptions( user_id ):
 	# print(nodes)
 	return( nodes )
 
+
 def get_channel_messages( channel_lookback_m ):
 	messages = {}
 	response = requests.get(conversation_history_URI, headers=http_headers, params={	"channel": channel, "oldest": str(int(time.time() - (channel_lookback_m * 60)))})
@@ -608,17 +594,19 @@ def get_channel_messages( channel_lookback_m ):
 		# print(message["user"])
 		if message["user"] != node_watcher_user_id:
 			# print(message["client_msg_id"] + message["user"]+ message["ts"] + message["text"])
-			messages[message["client_msg_id"]] = {"ts": message["ts"], "user": message["user"], "text":message["text"] }
-	
+			messages[message["client_msg_id"]] = {"ts": message["ts"], "user": message["user"], "text":message["text"] }	
 	return(messages)
+
 
 def is_valid_ip( ip_candidate ):
   ip_regex = r"^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$"
   if(re.search(ip_regex, ip_candidate)): 
     return(True)
 
+
 def subscribe_user( sub_dict ):
 	try:
+		# need to make sure the row exists first
 		query = '''INSERT or IGNORE into subscriptions(node_ip,advertised_router,metric) VALUES(?,?,?)'''
 		db_conn.execute(query, ( sub_dict["node_ip"], sub_dict["advertised_router"], sub_dict["metric"], ))
 		# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
@@ -635,6 +623,7 @@ def subscribe_user( sub_dict ):
 	except Exception as e:
 		print(e)
 		pass
+
 
 def unsubscribe_user( unsub_dict ):
 	# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
@@ -656,7 +645,8 @@ def unsubscribe_user( unsub_dict ):
 		pass
 	conn.commit()
 
-def get_link_name( advertising_router, ospf_link_json):
+
+def get_link_id( advertising_router, ospf_link_json):
 	link_name = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
 	return(link_name)
 
@@ -674,6 +664,7 @@ def link_has_subscribers( link_id ):
 	else:
 		print(f"no subs {link_id}")
 		return(False)
+
 
 def post_subscriptions( subscriptions, thread_ts ):
 	body = "you are subscribed to:"
@@ -700,14 +691,152 @@ def get_link_subscribers( link_list ):
 def post_router_adverts( router_id, thread_ts ):
 	try:
 		body = "   NODE_ID  ADVERTISED_ROUTER  METRIC\n         (for easy copy-paste)\n"
-		if 'router' in deserialized_json_2['areas']['0.0.0.0']['routers'][router_id]['links']:
-			for advertised_router in deserialized_json_2['areas']['0.0.0.0']['routers'][router_id]['links']['router']:
+		if 'router' in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']:
+			for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']['router']:
 				body += f'sub {router_id} {advertised_router["id"]} {advertised_router["metric"]}\n'
 	except Exception as e:
 		application_log.error('Error', exc_info=e)
 		print(e)
 		body = "oops something went wrong with router id lookup\ncould be due to no advertised routers for this node"
 	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
+
+def get_flap_qty( node_or_link_id, end_of_window_ms, window_duration_h ):
+	beginning_of_window_ms = end_of_window_ms - ( window_duration_h * 3600000 )
+	if "__" in node_or_link_id:
+		link_list = node_or_link_id.split("__")
+		query = 'SELECT COUNT(router_id) from link_state_changes WHERE router_id = ? AND advertised_router = ? AND metric = ? AND timestamp_ms BETWEEN ? AND ?'
+		row = db_conn.execute(query, (link_list[0], link_list[1], link_list[2], beginning_of_window_ms, end_of_window_ms, ))
+	else:
+		query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
+		row = db_conn.execute(query, (node_or_link_id, beginning_of_window_ms, end_of_window_ms, ))
+	row = row.fetchall()
+	return(row[0][0])
+
+
+def get_router_or_link_flaps( router_or_link_id ):
+	body ="\nDAILY\n"
+	body += str(get_flap_qty( router_or_link_id, current_timestamp_ms , 24)).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 1), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 2), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 3), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 4), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 5), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 6), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 7), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 8), 24 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 9), 24 )).ljust(4, " ") + \
+	      "\nHOURLY\n" + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 0), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 1), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 2), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 3), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 4), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 5), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 6), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 7), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 8), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 9), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 10), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 11), 1 )).ljust(4, " ") + \
+	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 12), 1 )) + "\n\n"
+	return(body)
+
+
+def get_link_partners( router_id ):
+	# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, advertised_router TEXT, router TEXT, metric INT, state TEXT)')
+	query = 'SELECT router_id, advertised_router, metric from link_state_changes WHERE advertised_router = ? AND timestamp_ms BETWEEN ? AND ?'
+	row = db_conn.execute(query, (router_id, current_timestamp_ms - (86400000 * 7), current_timestamp_ms,))
+	row = row.fetchall()
+	link_partners = list(set(row))
+	return(link_partners)
+
+
+def get_advertised_routers( router_id ):
+	try:
+		advertised_routers = []
+		if 'router' in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']:
+			for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']['router']:
+				advertised_routers.append(advertised_router)
+	except Exception as e:
+		# application_log.error('Error', exc_info=e)
+		# print(e)
+		return(None)
+	return( advertised_routers )
+
+
+def post_router_info( router_id, thread_ts ):
+	body  = f"\n\n\n\n--------------------------\n"
+	body         += f"-----    FLAP METRICS  \n"
+	body         += f"--------------------------"
+	body += f"\n\n*{router_id}*:{get_router_or_link_flaps( router_id )}"
+	body += f"\n\nNon-WDS Links to {router_id} that have flapped in the past week:\n"
+	for link_partner in get_link_partners(router_id):
+		link_id = link_partner[0] + "__" + link_partner[1] + "__" + str(link_partner[2])
+		body += f'*{link_id}*{get_router_or_link_flaps(link_id)}'
+	body += f"\n\n{router_id}'s advertised routers in live LSDB as of {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime('%Y-%m-%d %H:%M:%S')}:\n"
+	if get_advertised_routers( router_id ):
+		for advertised_router in get_advertised_routers( router_id ):
+			body += f'*{advertised_router["id"]}*:{get_router_or_link_flaps( advertised_router["id"])}'
+	else:
+		body += f"looks like {router_id} is down currently so no info is available"
+	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+
+
+# def get_flappy_links( end_of_window_ms, window_length_h ):
+# 	# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, advertised_router TEXT, metric INT, state TEXT)'
+# 	beginning_of_window_ms = end_of_window_ms - ( window_length_h * 3600000 )
+# 	query = 'SELECT DISTINCT router_id, advertised_router, metric FROM link_state_changes WHERE timestamp_ms BETWEEN ? AND ?'
+# 	row = db_conn.execute(query, (beginning_of_window_ms, end_of_window_ms, ))
+# 	row = row.fetchall()
+# 	print(row)
+# 	# flappy_links = []
+# 	flappy_links_unfiltered = []
+# 	for link_id in row:
+# 		query = 'SELECT COUNT(router_id) from link_state_changes WHERE router_id = ? AND advertised_router = ? AND metric = ? AND timestamp_ms BETWEEN ? AND ? ORDER BY COUNT(router_id) DESC'
+# 		row = db_conn.execute(query, (link_id[0], link_id[1], link_id[2], beginning_of_window_ms, end_of_window_ms, ))
+# 		row = row.fetchall()
+# 		if row[0][0] >= link_flap_time_window_qty and (link_id[1] + "__" + link_id[0] + "__" + str(link_id[2])) not in flappy_links_unfiltered:
+# 			flappy_links_unfiltered.append( link_id[0] + "__" + link_id[1] + "__" + str(link_id[2]) )			
+# 	return( flappy_links_unfiltered )
+
+
+
+def get_flappy_nodes( current_timestamp_ms, window_length_h=flap_time_window_hrs ):
+	beginning_of_window = current_timestamp_ms - ( window_length_h * 3600000 )
+	query = 'SELECT router_id, count(*) as counter FROM node_state_changes WHERE timestamp_ms BETWEEN ? AND ? GROUP BY router_id ORDER BY counter DESC'
+	row = db_conn.execute(query, (beginning_of_window, current_timestamp_ms, ))
+	row = row.fetchall()
+	flappy_nodes_unfiltered = []
+	for router_id in row:
+		if router_id[1] >= flap_time_window_qty:
+			flappy_nodes_unfiltered.append( router_id[0] )			
+	return( flappy_nodes_unfiltered )
+
+
+def get_flappy_links( end_of_window_ms, window_length_h ):
+	# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, advertised_router TEXT, metric INT, state TEXT)'
+	beginning_of_window_ms = end_of_window_ms - ( window_length_h * 3600000 )
+	query = 'SELECT router_id, advertised_router, metric, COUNT(*) as counter FROM link_state_changes WHERE timestamp_ms BETWEEN ? AND ? GROUP BY router_id, advertised_router, metric ORDER BY counter DESC'
+	row = db_conn.execute(query, (beginning_of_window_ms, end_of_window_ms, ))
+	row = row.fetchall()
+	flappy_links_deduped = []
+	for link_id in row:
+		if int(link_id[3]) >= link_flap_time_window_qty and (link_id[1] + "__" + link_id[0] + "__" + str(link_id[2])) not in flappy_links_deduped:
+			flappy_links_deduped.append( link_id[0] + "__" + link_id[1] + "__" + str(link_id[2]) )		
+	return( flappy_links_deduped )
+
+
+def get_router_or_link_flaps_daily( node_or_link_id, days_qty=7 ):
+	if "__" in node_or_link_id:
+		ljust = 34
+	else:
+		ljust = 16
+	body = ""
+	body += node_or_link_id.ljust(ljust, " ") +  str(get_flap_qty( node_or_link_id, current_timestamp_ms, 24 )).ljust(5, " ")
+	for counter in range( 1, days_qty ):
+		body += str(get_flap_qty( node_or_link_id, current_timestamp_ms - (86400000 * counter), 24 )).ljust(5, " ")
+	return(body)
 
 
 
@@ -764,33 +893,31 @@ while True:
 		recently_added_links = []
 
 		try:
-			for router in deserialized_json_1['areas']['0.0.0.0']['routers']:
+			for router in deserialized_json_2['areas']['0.0.0.0']['routers']:
 				# print(f'\n\n{router}')
-				if 'router' in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']:
-					for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']['router']:
+				if 'router' in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']:
+					for advertised_router in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']['router']:
 						try:
-							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']['router']:
-								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)'
-								# print(f'{advertised_router}\nremoved')
-								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "down")'
+							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']['router']:
+								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, advertised_router TEXT, metric INT, state TEXT)'
+								query = 'INSERT into link_state_changes(timestamp_ms, router_id, advertised_router, metric, state) VALUES(?,?,?,?, "down")'
 								db_conn.execute(query, (current_timestamp_ms, router, advertised_router['id'], advertised_router['metric'], ))
-								link_name = get_link_name(router, advertised_router)
+								link_name = get_link_id(router, advertised_router)
 								recently_removed_links.append(link_name)							
 								link_changes_log.info(f'{link_name.ljust(32, " ")}  --DOWN--    {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime("%Y-%m-%d %H:%M")}')
 						except Exception as e:
 							print(e)
 							pass
 
-			for router in deserialized_json_2['areas']['0.0.0.0']['routers']:
-				if 'router' in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']:
-					for advertised_router in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']['router']:
+			for router in deserialized_json_1['areas']['0.0.0.0']['routers']:
+				if 'router' in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']:
+					for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']['router']:
 						try:
-							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_1['areas']['0.0.0.0']['routers'][router]['links']['router']:
-								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, router TEXT, metric INT, state TEXT)'
-								# print(f'{advertised_router}\nadded')
-								query = 'INSERT into link_state_changes(timestamp_ms, router_id, router, metric, state) VALUES(?,?,?,?, "up")'
+							if advertised_router['metric'] != 100 and advertised_router not in deserialized_json_2['areas']['0.0.0.0']['routers'][router]['links']['router']:
+								# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, advertised_router TEXT, metric INT, state TEXT)'
+								query = 'INSERT into link_state_changes(timestamp_ms, router_id, advertised_router, metric, state) VALUES(?,?,?,?, "up")'
 								db_conn.execute(query, (current_timestamp_ms, router, advertised_router['id'], advertised_router['metric'], ))
-								link_name = get_link_name(router, advertised_router)
+								link_name = get_link_id(router, advertised_router)
 								recently_added_links.append(link_name)
 								link_changes_log.info(f'{link_name.ljust(32, " ")}  --UP--      {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime("%Y-%m-%d %H:%M")}') #'   downtime: {get_downtime_humanized(link_name)}')
 						except Exception as e:
@@ -897,8 +1024,6 @@ while True:
 					latest_post_URI = thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
 					# Post alert message to main channel
-					# application_log.info( "is silenced: " )
-					# application_log.info( str(is_silenced( router_id ) ))
 					body = node_up_emoji + " "
 					if router_id in flappy_nodes:
 						body += flap_emoji + " "
@@ -926,7 +1051,6 @@ while True:
 				and router_id not in silenced_nodes_cache:
 
 					hub_down_group = removed_nodes_tracker[router_id]["hub_down_group"]
-					print("691" + str(type(hub_down_group)))
 					if not hub_down_group in hub_down_added_nodes:
 						hub_down_added_nodes[hub_down_group] = []
 
@@ -1415,7 +1539,9 @@ while True:
 		#####################################
 
 
-		if dt.datetime.today().hour == reporting_hour and dt.datetime.today().minute == reporting_minute:
+		# if dt.datetime.today().hour == reporting_hour and dt.datetime.today().minute == reporting_minute:
+
+		if dt.datetime.today().minute == reporting_minute:
 
 			abandoned_nodes = []
 			for router_id in removed_nodes_tracker:
@@ -1466,29 +1592,32 @@ while True:
 				if nodes_to_be_mapped:
 					down_report += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes>"
 
-				if flappy_nodes:
-					down_report += "\n\n*Flappy Nodes*: \n"
-					down_report += "```NODE            FLAPS TODAY, YESTERDAY, ETC\n"
-					for router_id in flappy_nodes:
-						down_report += router_id.ljust(16, " ") + str(get_flap_qty( router_id, current_timestamp_ms )).ljust(4, " ") + \
-						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 1) )).ljust(4, " ") + \
-						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 2) )).ljust(4, " ") + \
-						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 3) )).ljust(4, " ") + \
-						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 4) )).ljust(4, " ") + \
-						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 5) )).ljust(4, " ") + \
-						str(get_flap_qty( router_id, current_timestamp_ms - (86400000 * 6) )) + "\n"
-					down_report += "```"
+			if flappy_nodes:
+				down_report += "\n\n*Flappy Nodes*: \n"
+				down_report += "```NODE            FLAPS TODAY, YESTERDAY, ETC\n"
+				for router_id in get_flappy_nodes(current_timestamp_ms):
+					down_report += get_router_or_link_flaps_daily( router_id ) + "\n"
+				down_report += "```"
 
-				if flappy_nodes_tracker:
-					abandoned_flappy_nodes = []
-					for router_id in flappy_nodes_tracker:
-						if current_timestamp_ms - flappy_nodes_tracker[router_id]["timestamp"] > abandoned_threshold_ms:
-							abandoned_flappy_nodes.append( router_id )
-					if abandoned_flappy_nodes:
-						for router_id in abandoned_flappy_nodes:
-							flappy_nodes_tracker.pop( router_id )
 
-				response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
+			if flappy_nodes_tracker:
+				abandoned_flappy_nodes = []
+				for router_id in flappy_nodes_tracker:
+					if current_timestamp_ms - flappy_nodes_tracker[router_id]["timestamp"] > abandoned_threshold_ms:
+						abandoned_flappy_nodes.append( router_id )
+				if abandoned_flappy_nodes:
+					for router_id in abandoned_flappy_nodes:
+						flappy_nodes_tracker.pop( router_id )
+
+
+			down_report += "\n\n*Flappy non-WDS Links*: \n"
+			down_report += "```LINK                              FLAPS TODAY, YESTERDAY, ETC\n"
+			flappy_links = get_flappy_links(current_timestamp_ms, 24)
+			for flappy_link in get_flappy_links(current_timestamp_ms, 24):
+				down_report += (get_router_or_link_flaps_daily(flappy_link, 7))  + "\n"
+			down_report += "```"
+
+			response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
 
@@ -1500,6 +1629,7 @@ while True:
 		if dt.datetime.today().minute % read_channel_period_m == 0:
 			messages = get_channel_messages( channel_lookback_m )
 			sorted_messages = sorted(messages, key=select_ts)
+			print(sorted_messages)
 			for message in sorted_messages:
 				input_is_valid = False
 				thread_ts      = messages[message]["ts"]
@@ -1510,9 +1640,10 @@ while True:
 					input_is_valid = True
 					post_subscriptions( get_subscriptions( user_id ), thread_ts )
 
-				if user_text_list[0] in ["show", "Show"] and user_text_list[1] == "router" and is_valid_ip(user_text_list[2]):
+				if user_text_list[0] in ["show", "Show"] and user_text_list[1] == "router" and is_valid_ip(user_text_list[2]) and len(user_text_list) == 3:
 					input_is_valid = True
 					post_router_adverts( user_text_list[2], thread_ts )
+					post_router_info( user_text_list[2], thread_ts)
 				
 				elif user_text_list[0] in ["subscribe", "Subscribe", "sub", "Sub"]:
 					if is_valid_ip(user_text_list[1]):
