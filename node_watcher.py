@@ -20,6 +20,7 @@ except Exception as error:
 
 delete_message_URI         = "https://slack.com/api/chat.delete"
 get_reactions_URI          = "https://slack.com/api/reactions.get"
+add_reactions_URI          = "https://slack.com/api/reactions.add"
 post_message_URI           = "https://slack.com/api/chat.postMessage"
 node_map_prefix            = "https://www.nycmesh.net/map/nodes/"
 conversations_replies_URI  = "https://slack.com/api/conversations.replies"
@@ -42,7 +43,6 @@ def setup_logger(name, log_file, log_level):
 #####################
 ####   CONFIG    ####
 #####################
-
 
 
 node_down_threshold_ms       = 300000 # how long a node is observed to be down before it goes into alerting state
@@ -188,6 +188,10 @@ if use_database_persistence == True:
 	# flappy_nodes_tracker = {}
 	# hub_down_tracker = {}
 	# silenced_nodes_cache = []
+
+post_removed_nodes_tracker_thread_ts = None # when user adds or removes nodes, this will post the tracker on the next run
+nodes_to_remove                      = []     # add nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only works in dev
+nodes_to_inject                      = []     # remove nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only works in dev
 
 
 
@@ -466,7 +470,7 @@ def get_downtime_humanized( router_or_link_id, threshold_ms=None, type="router" 
 	# doing this to make things look cleaner from rounding, at the cost of a bit of accuracy
 	if threshold_ms is not None:
 		alert_threshold_m = round(threshold_ms / 60000) 
-		if down_time_m in [alert_threshold_m - 1, alert_threshold_m, alert_threshold_m + 1]:
+		if down_time_m in [alert_threshold_m - 1, alert_threshold_m, alert_threshold_m + 1]: # makes the interface more consistent-looking
 			downtime_humanized = str(alert_threshold_m) + " min"
 			return ( downtime_humanized )
 	if down_time_m < 60:
@@ -554,8 +558,6 @@ def get_node_webmap_URI( nodes_to_be_mapped ):
 	return( node_map_URI )
 
 
-
-
 # def get_flap_qty( router_id, end_of_window_ms ):
 # 	beginning_of_window = end_of_window_ms - ( flap_time_window_hrs * 3600000 )
 # 	query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
@@ -564,38 +566,30 @@ def get_node_webmap_URI( nodes_to_be_mapped ):
 # 	return(row[0][0])
 
 
-def get_link_id( advertising_router, ospf_link_json):
-	link_name = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
-	return(link_name)
+# def get_link_id( advertising_router, ospf_link_json ):
+# 	link_id = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
+# 	return( link_id )
 
 
-def select_ts(message):
+def select_ts( message ):
 	return(messages[message]["ts"])
 
 
-def get_subscriptions( user_id ):
+def get_user_subscriptions( user_id ):
 	query = "SELECT node_ip, advertised_router, metric from subscriptions where subscribers LIKE '%'||?||'%'"
-	nodes = db_conn.execute(query, ( user_id, ))
-	nodes = nodes.fetchall()
-	subscriptions = []
-	for node in nodes:
-		subscriptions.append( node[0])
-	# print(nodes)
-	return( nodes )
+	subscriptions = db_conn.execute(query, ( user_id, ))
+	subscriptions = subscriptions.fetchall()
+	return( subscriptions )
 
 
 def get_channel_messages( channel_lookback_m ):
 	messages = {}
 	response = requests.get(conversation_history_URI, headers=http_headers, params={	"channel": channel, "oldest": str(int(time.time() - (channel_lookback_m * 60)))})
 	json_data = response.json()
-	# print(json.dumps(json_data, indent=2))
 	for message in json_data["messages"]:
-		# print(message)
-		# print(message["user"])
 		if message["user"] != node_watcher_user_id:
-			# print(message["client_msg_id"] + message["user"]+ message["ts"] + message["text"])
 			messages[message["client_msg_id"]] = {"ts": message["ts"], "user": message["user"], "text":message["text"] }	
-	return(messages)
+	return( messages )
 
 
 def is_valid_ip( ip_candidate ):
@@ -606,10 +600,10 @@ def is_valid_ip( ip_candidate ):
 
 def subscribe_user( sub_dict ):
 	try:
+		# 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT, advertised_router TEXT, metric INT, subscribers TEXT DEFAULT (json_array()) NOT NULL, UNIQUE(node_ip,advertised_router,metric))'
 		# need to make sure the row exists first
-		query = '''INSERT or IGNORE into subscriptions(node_ip,advertised_router,metric) VALUES(?,?,?)'''
+		query = 'INSERT or IGNORE into subscriptions(node_ip,advertised_router,metric) VALUES(?,?,?)'
 		db_conn.execute(query, ( sub_dict["node_ip"], sub_dict["advertised_router"], sub_dict["metric"], ))
-		# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
 		# All this fru-fru does is ensure that unique values get added to the array i.e. no duplicates
 		query = ''' UPDATE subscriptions
 					SET subscribers = (SELECT json_group_array(DISTINCT value) 
@@ -626,7 +620,7 @@ def subscribe_user( sub_dict ):
 
 
 def unsubscribe_user( unsub_dict ):
-	# schema: 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT PRIMARY KEY, subscribers TEXT DEFAULT (json_array()) NOT NULL )'
+	# 'CREATE TABLE IF NOT EXISTS subscriptions(node_ip TEXT, advertised_router TEXT, metric INT, subscribers TEXT DEFAULT (json_array()) NOT NULL, UNIQUE(node_ip,advertised_router,metric))'
 	query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'''
 	row = db_conn.execute(query, (unsub_dict["node_ip"],unsub_dict["advertised_router"], unsub_dict["metric"],))
 	row = row.fetchall()
@@ -647,8 +641,8 @@ def unsubscribe_user( unsub_dict ):
 
 
 def get_link_id( advertising_router, ospf_link_json):
-	link_name = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
-	return(link_name)
+	link_id = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
+	return(link_id)
 
 
 def link_has_subscribers( link_id ):
@@ -657,12 +651,13 @@ def link_has_subscribers( link_id ):
 	query = "SELECT subscribers from subscriptions where node_ip = ? and advertised_router = ? and metric = ?"
 	subscribers_json = db_conn.execute(query, ( link_list[0], link_list[1], link_list[2], ))
 	subscribers_json = subscribers_json.fetchall()
-	# print(f'\n\n\n{subscribers_json}\n\n\n')
+	application_log.info(f'line 655 subscribers_json: {subscribers_json}')
 	if subscribers_json:
-		print(f"yes subs {link_id}")
-		return(True)
+		if subscribers_json[0][0] == '[]':
+			return(False)
+		else:
+			return(True)
 	else:
-		print(f"no subs {link_id}")
 		return(False)
 
 
@@ -677,14 +672,13 @@ def post_subscriptions( subscriptions, thread_ts ):
 
 def get_link_subscribers( link_list ):
 	link_subscribers = []
-	query = ''' SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'''
+	query = 'SELECT subscribers from subscriptions, json_each(subscribers) where node_ip = ? AND advertised_router = ? AND metric = ?'
 	row = db_conn.execute(query, (link_list[0], link_list[1], link_list[2], ))
 	row = row.fetchall()
 	if row:
 		subbed_users_in_db = json.loads(row[0][0])
 		for subbed_user_in_db in subbed_users_in_db:
 			link_subscribers.append( subbed_user_in_db )
-
 	return( link_subscribers )
 
 
@@ -696,50 +690,34 @@ def post_router_adverts( router_id, thread_ts ):
 				body += f'sub {router_id} {advertised_router["id"]} {advertised_router["metric"]}\n'
 	except Exception as e:
 		application_log.error('Error', exc_info=e)
-		print(e)
-		body = "oops something went wrong with router id lookup\ncould be due to no advertised routers for this node"
+		body = "router ID not found in live LSDB\ncould be due to down node/router"
+		pass
 	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 
 def get_flap_qty( node_or_link_id, end_of_window_ms, window_duration_h ):
 	beginning_of_window_ms = end_of_window_ms - ( window_duration_h * 3600000 )
-	if "__" in node_or_link_id:
+	if "__" in node_or_link_id:  # must be link
 		link_list = node_or_link_id.split("__")
 		query = 'SELECT COUNT(router_id) from link_state_changes WHERE router_id = ? AND advertised_router = ? AND metric = ? AND timestamp_ms BETWEEN ? AND ?'
 		row = db_conn.execute(query, (link_list[0], link_list[1], link_list[2], beginning_of_window_ms, end_of_window_ms, ))
-	else:
+	else:  # must be node
 		query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
 		row = db_conn.execute(query, (node_or_link_id, beginning_of_window_ms, end_of_window_ms, ))
 	row = row.fetchall()
 	return(row[0][0])
 
 
-def get_router_or_link_flaps( router_or_link_id ):
-	body ="\nDAILY\n"
-	body += str(get_flap_qty( router_or_link_id, current_timestamp_ms , 24)).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 1), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 2), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 3), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 4), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 5), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 6), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 7), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 8), 24 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * 9), 24 )).ljust(4, " ") + \
-	      "\nHOURLY\n" + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 0), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 1), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 2), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 3), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 4), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 5), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 6), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 7), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 8), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 9), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 10), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 11), 1 )).ljust(4, " ") + \
-	str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * 12), 1 )) + "\n\n"
+def get_router_or_link_flaps( router_or_link_id, days_qty=7, hours_qty=12 ):
+	body =  "\nDAILY\n"
+	for counter in range( 0, days_qty - 1 ):
+		print(counter)
+		print(router_or_link_id)
+		body += str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * counter), 24 )).ljust(4, " ")
+	body +=	"\nHOURLY\n"
+	for counter in range( 0, hours_qty -1 ):
+		body += str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * counter), 1 )).ljust(4, " ")
+	body += "\n\n"
 	return(body)
 
 
@@ -759,8 +737,7 @@ def get_advertised_routers( router_id ):
 			for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']['router']:
 				advertised_routers.append(advertised_router)
 	except Exception as e:
-		# application_log.error('Error', exc_info=e)
-		# print(e)
+		application_log.error('Error', exc_info=e)
 		return(None)
 	return( advertised_routers )
 
@@ -801,7 +778,6 @@ def post_router_info( router_id, thread_ts ):
 # 	return( flappy_links_unfiltered )
 
 
-
 def get_flappy_nodes( current_timestamp_ms, window_length_h=flap_time_window_hrs ):
 	beginning_of_window = current_timestamp_ms - ( window_length_h * 3600000 )
 	query = 'SELECT router_id, count(*) as counter FROM node_state_changes WHERE timestamp_ms BETWEEN ? AND ? GROUP BY router_id ORDER BY counter DESC'
@@ -837,6 +813,15 @@ def get_router_or_link_flaps_daily( node_or_link_id, days_qty=7 ):
 	for counter in range( 1, days_qty ):
 		body += str(get_flap_qty( node_or_link_id, current_timestamp_ms - (86400000 * counter), 24 )).ljust(5, " ")
 	return(body)
+
+
+def post_removed_nodes_tracker( thread_ts ):
+	body = "```"
+	for removed_node in removed_nodes_tracker:
+		node_downtime_humanized = get_downtime_humanized( removed_node )
+		body += removed_node.ljust(16, " ") + "downtime: " + node_downtime_humanized.ljust(16, " ") + "\n"
+	body += "```"
+	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 
 
@@ -884,8 +869,20 @@ while True:
 		for ospf_node in routers:
 			previous_nodes.append(ospf_node)
 
+
 		recently_added_nodes_unfiltered   = list(set(current_nodes) - set(previous_nodes))
 		recently_removed_nodes_unfiltered = list(set(previous_nodes) - set(current_nodes))
+
+
+		if environment == "dev":
+			if nodes_to_remove:
+				for node in nodes_to_remove:
+					if node in recently_removed_nodes_unfiltered:
+						nodes_to_remove.remove( node )
+			if nodes_to_inject:
+				for node in nodes_to_inject:
+					if node in recently_added_nodes_unfiltered:
+						nodes_to_inject.remove( node )
 
 
 
@@ -939,7 +936,8 @@ while True:
 		application_log.info(f"{current_timestamp_ms} {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime('%Y-%m-%d %H:%M:%S')}")
 
 		# Get all changes into db, _then_ filter
-		recently_removed_nodes = []
+		recently_removed_nodes = nodes_to_remove
+		nodes_to_remove = []
 		if recently_removed_nodes_unfiltered:
 			for router_id in recently_removed_nodes_unfiltered:
 				query = 'INSERT into node_state_changes(timestamp_ms, router_id, state) VALUES(?,?, "down")'
@@ -955,7 +953,8 @@ while True:
 			if ok_to_monitor(flappy_node):
 				flappy_nodes.append(flappy_node)
    
-		recently_added_nodes = []
+		recently_added_nodes = nodes_to_inject
+		nodes_to_inject = []
 		if recently_added_nodes_unfiltered:
 			for router_id in recently_added_nodes_unfiltered:
 				query = 'INSERT into node_state_changes(timestamp_ms, router_id, state) VALUES(?,?, "up")'
@@ -1049,21 +1048,16 @@ while True:
 				elif router_id in removed_nodes_tracker and removed_nodes_tracker[router_id]["alerting"] == True \
 				and "hub_down_group" in removed_nodes_tracker[router_id] \
 				and router_id not in silenced_nodes_cache:
-
 					hub_down_group = removed_nodes_tracker[router_id]["hub_down_group"]
 					if not hub_down_group in hub_down_added_nodes:
 						hub_down_added_nodes[hub_down_group] = []
-
 					hub_down_added_nodes[hub_down_group].append(router_id)
 					# removed_nodes_tracker.pop(router_id)
 
 
 			if hub_down_added_nodes:
-
 				application_log.info(f"hub_down_added_nodes: {hub_down_added_nodes}")
-
 				for hub_down_group in hub_down_added_nodes:
-
 					query = 'SELECT * FROM slack_threads WHERE node_ip = ?' # TODO rename this node_ip column, or move this data to another table
 					row = db_conn.execute(query, (str(hub_down_group),))
 					row = row.fetchall()
@@ -1082,10 +1076,11 @@ while True:
 					if not get_hub_down_group_members( hub_down_group ):
 						body = (":sunglasses: all nodes are up" )
 						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+						response = requests.post(add_reactions_URI, headers=http_headers, data=json.dumps({  "name": "sunglasses", "channel": channel , "timestamp": thread_ts}))
 						try:
 							hub_down_tracker.pop(hub_down_group) # under normal conditions this works
 						except:
-							hub_down_tracker.pop(str(hub_down_group)) # if the program has been restarted during hub-down event, hub_down_tracker is loaded from db, and keys are now str, not int TODO fix this
+							hub_down_tracker.pop(str(hub_down_group)) # if node-watcher has been restarted during hub-down event, hub_down_tracker is loaded from db, and keys are now str, not int TODO fix this
 
 
 		if recently_added_links:
@@ -1147,7 +1142,6 @@ while True:
 
 
 		if recently_removed_nodes:
-
 			# Need this to decide if this may be a hub-down event
 			unsuppressed_qty = 0
 			for router_id in recently_removed_nodes:
@@ -1166,22 +1160,14 @@ while True:
 				for router_id in recently_removed_nodes:
 					removed_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : False}
 
-
-
-
 		if recently_removed_links:
 			for link_id in recently_removed_links:
 				if link_has_subscribers( link_id ):
 					removed_links_tracker[link_id] = {"timestamp" : current_timestamp_ms, "alerting" : False}
 
-
-
-
 		if removed_nodes_tracker:
-
 			hub_down_nodes_current = []
 			for router_id in removed_nodes_tracker:	
-
 				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > node_down_threshold_ms \
 				and removed_nodes_tracker[router_id]["alerting"] == False \
 				and "hub_down_group" not in removed_nodes_tracker[router_id] \
@@ -1265,7 +1251,6 @@ while True:
 					hub_down_nodes_current.append( router_id ) 
 
 
-
 			application_log.info(f"hub_down_nodes_current: {hub_down_nodes_current}")
 			if hub_down_nodes_current and len(hub_down_nodes_current) >= hub_down_node_qty: # need to do this check again in case any nodes have come back up
 				hub_down_group = removed_nodes_tracker[hub_down_nodes_current[0]]["timestamp"]
@@ -1311,9 +1296,11 @@ while True:
 				hubdown_parent_thread_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
 
+
 				######################
 				###   ESCALATION   ###
 				######################
+
 
 				if len(hub_down_nodes_current) >= hub_down_raise_qty:
 					body = ""
@@ -1354,7 +1341,6 @@ while True:
 										nodes_to_be_mapped.append(IP_to_NN( router_id ))
 									body += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of nodes that are still down in this outage>"
 									response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
-
 
 
 		if removed_links_tracker:
@@ -1428,8 +1414,6 @@ while True:
 						db_conn.execute(query, (router_id, thread_ts, ))
 
 					removed_links_tracker[link_id]["alerting"] = True
-
-
 
 		conn.commit()
 
@@ -1525,11 +1509,8 @@ while True:
 				# ('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT, value TEXT)')
 				query = 'INSERT or REPLACE into persistence(variable_name, value) VALUES(?,?)' 
 				dummy_data = db_conn.execute(query, (variable_name, json_data,))
-
 			query = 'INSERT or REPLACE into persistence(variable_name, value) VALUES(?,?)' 
 			db_conn.execute(query, ("current_timestamp_ms", current_timestamp_ms,))
-
-		# commit changes to db ;)
 		conn.commit()
 
 
@@ -1542,8 +1523,11 @@ while True:
 		# if dt.datetime.today().hour == reporting_hour and dt.datetime.today().minute == reporting_minute:
 
 		if dt.datetime.today().minute == reporting_minute:
+		# if True:
 
+			down_report = ""
 			abandoned_nodes = []
+			nodes_to_be_mapped = []
 			for router_id in removed_nodes_tracker:
 
 				if current_timestamp_ms - removed_nodes_tracker[router_id]["timestamp"] > abandoned_threshold_ms:
@@ -1559,6 +1543,8 @@ while True:
 			if len( removed_nodes_tracker ) == 0:
 				down_report_summary += " :tada:"
 			response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report_summary, "channel": channel}))
+			json_data = response.json()
+			thread_ts = json_data["ts"]
 
 
 			if removed_nodes_tracker:
@@ -1569,9 +1555,8 @@ while True:
 
 					# nodes_to_be_mapped = list(set(nodes_to_be_mapped))
 
-				json_data = response.json()
-				thread_ts = json_data["ts"]
-				down_report = "*Down Nodes*:\n"
+
+				down_report += "*Down Nodes*:\n"
 				down_report += "```NODE            DOWNTIME        SUPPRESSED \n"
 				for router_id in removed_nodes_tracker:
 					if router_id not in abandoned_nodes:
@@ -1592,10 +1577,12 @@ while True:
 				if nodes_to_be_mapped:
 					down_report += "\n<" + get_node_webmap_URI(nodes_to_be_mapped) + "|Map of down nodes>"
 
+			print(flappy_nodes)
 			if flappy_nodes:
 				down_report += "\n\n*Flappy Nodes*: \n"
 				down_report += "```NODE            FLAPS TODAY, YESTERDAY, ETC\n"
-				for router_id in get_flappy_nodes(current_timestamp_ms):
+				flappy_nodes_reporting = get_flappy_nodes(current_timestamp_ms)
+				for router_id in flappy_nodes_reporting:
 					down_report += get_router_or_link_flaps_daily( router_id ) + "\n"
 				down_report += "```"
 
@@ -1614,9 +1601,15 @@ while True:
 			down_report += "```LINK                              FLAPS TODAY, YESTERDAY, ETC\n"
 			flappy_links = get_flappy_links(current_timestamp_ms, 24)
 			for flappy_link in get_flappy_links(current_timestamp_ms, 24):
-				down_report += (get_router_or_link_flaps_daily(flappy_link, 7))  + "\n"
+				down_report += (get_router_or_link_flaps_daily(flappy_link, 7))
+				link_list = flappy_link.split("__")
+				if nodes_to_be_mapped and link_list[1] in nodes_to_be_mapped:
+					down_report += "D"
+				if flappy_nodes_reporting and link_list[1] in flappy_nodes_reporting:
+					down_report += "F"
+				down_report += "\n"
 			down_report += "```"
-
+			
 			response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": down_report, "channel": channel , "thread_ts": thread_ts, "unfurl_links": False}))
 
 
@@ -1626,10 +1619,13 @@ while True:
 		################################
 
 
+		if post_removed_nodes_tracker_thread_ts: # the tracker is sent to channel on the following run after user requests to add/remove nodes
+			post_removed_nodes_tracker( post_removed_nodes_tracker_thread_ts )
+			post_removed_nodes_tracker_thread_ts = None
+
 		if dt.datetime.today().minute % read_channel_period_m == 0:
 			messages = get_channel_messages( channel_lookback_m )
 			sorted_messages = sorted(messages, key=select_ts)
-			print(sorted_messages)
 			for message in sorted_messages:
 				input_is_valid = False
 				thread_ts      = messages[message]["ts"]
@@ -1638,12 +1634,36 @@ while True:
 				user_text_list = user_text.split(" ")
 				if user_text in ["show subscriptions", "Show subscriptions", "show subs", "Show subs"]:
 					input_is_valid = True
-					post_subscriptions( get_subscriptions( user_id ), thread_ts )
+					post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
 
-				if user_text_list[0] in ["show", "Show"] and user_text_list[1] == "router" and is_valid_ip(user_text_list[2]) and len(user_text_list) == 3:
+				elif user_text_list[0] in ["show", "Show"] and user_text_list[1] == "router" and is_valid_ip(user_text_list[2]) and len(user_text_list) == 3:
 					input_is_valid = True
 					post_router_adverts( user_text_list[2], thread_ts )
 					post_router_info( user_text_list[2], thread_ts)
+
+				elif user_text_list[0] in ["remove", "Remove"] and len(user_text_list) > 1:
+					for ip_candidate in user_text_list[1:]:
+						print(ip_candidate)
+						if ip_candidate == user_text_list[-1] and is_valid_ip( ip_candidate ):
+							input_is_valid = True
+							nodes_to_remove.append(ip_candidate)
+						elif is_valid_ip( ip_candidate ):
+							nodes_to_remove.append(ip_candidate)
+						else:
+							break
+					post_removed_nodes_tracker_thread_ts = thread_ts
+					print(nodes_to_remove)
+
+				elif user_text_list[0] in ["add", "Add"] and len(user_text_list) > 1:
+					for ip_candidate in user_text_list[1:]:
+						if ip_candidate == user_text_list[-1] and is_valid_ip( ip_candidate ):
+							input_is_valid = True
+							nodes_to_inject.append(ip_candidate)
+						elif is_valid_ip( ip_candidate ):
+							nodes_to_inject.append(ip_candidate)
+						else:
+							break
+					post_removed_nodes_tracker_thread_ts = thread_ts
 				
 				elif user_text_list[0] in ["subscribe", "Subscribe", "sub", "Sub"]:
 					if is_valid_ip(user_text_list[1]):
@@ -1652,17 +1672,17 @@ while True:
 								input_is_valid = True
 								sub_dict = {"node_ip": user_text_list[1], "advertised_router": "none", "metric": -1, "user_id": user_id}
 								subscribe_user( sub_dict )
-								post_subscriptions( get_subscriptions( user_id ), thread_ts )
+								post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
 							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
 								input_is_valid = True
 								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
 								subscribe_user( sub_dict )
-								post_subscriptions( get_subscriptions( user_id ), thread_ts )
+								post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
 							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[2]) and 0 <= int(user_text_list[3]) <= 10000:
 								input_is_valid = True
 								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
 								subscribe_user( sub_dict )
-								post_subscriptions( get_subscriptions( user_id), thread_ts )
+								post_subscriptions( get_user_subscriptions( user_id), thread_ts )
 						except Exception as e:
 							application_log.error(f"line 1536: {e}")
 							print(e)
@@ -1676,21 +1696,22 @@ while True:
 								input_is_valid = True
 								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": "none", "metric": -1, "user_id": user_id}
 								unsubscribe_user( unsub_dict )
-								post_subscriptions( get_subscriptions( user_id), thread_ts )
+								post_subscriptions( get_user_subscriptions( user_id), thread_ts )
 							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
 								input_is_valid = True
 								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
 								unsubscribe_user( unsub_dict )
-								post_subscriptions( get_subscriptions( user_id ), thread_ts )
+								post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
 							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[2]) and 0 <= int(user_text_list[3]) <= 10000:
 								input_is_valid = True
 								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
 								unsubscribe_user( unsub_dict )
-								post_subscriptions( get_subscriptions( user_id), thread_ts )
+								post_subscriptions( get_user_subscriptions( user_id), thread_ts )
 						except Exception as e:
 							application_log.error(f"line 1560: {e}")
 							print(e)
 							pass
+
 
 				if not input_is_valid:
 					body = "invalid input bro\noptions are `show subscriptions|subs`, `show router <router id>`, `subscribe|sub <router id>`, `unsubscribe|unsub <router id>`"
@@ -1698,24 +1719,26 @@ while True:
 
 
 
+		##################################
+		#####   DUMP TO LOG/STDOUT   #####
+		##################################
 
 
-		print(f"removed_nodes_tracker: {removed_nodes_tracker}\nremoved_links_tracker: {removed_links_tracker}\nflappy_nodes_tracker: {flappy_nodes_tracker}\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
+		print(f"removed_nodes_tracker: {removed_nodes_tracker}\n\nremoved_links_tracker: {removed_links_tracker}\n\nflappy_nodes_tracker: {flappy_nodes_tracker}\n\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
 		print(str(current_timestamp_ms))
 		if time_rollback_s != 0:
 			application_log.info(a_minute_ago_snapshot_URI)
-		application_log.info(f"removed_nodes_tracker: {removed_nodes_tracker}\nremoved_links_tracker: {removed_links_tracker}\nflappy_nodes_tracker: {flappy_nodes_tracker}\n\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n\n")
+		application_log.info(f"removed_nodes_tracker: {removed_nodes_tracker}\n\nremoved_links_tracker: {removed_links_tracker}\n\nflappy_nodes_tracker: {flappy_nodes_tracker}\n\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n\n")
 
 		diff_s = time.time() - start_time_s
 		sleep(60 - diff_s) # this keeps us roughly in-sync with the BIRD server's cron job
 
 
 
-
-			
+	# if main loop fails
 	except Exception as e:
 		application_log.error('Error', exc_info=e)
-		application_log.info(a_minute_ago_snapshot_URI)
+		application_log.error(a_minute_ago_snapshot_URI)
 		# a potential cause of errors is doing something at the same time that BIRD is, so nudging the time here
 		sleep(error_sleep_time_s)
 		continue
