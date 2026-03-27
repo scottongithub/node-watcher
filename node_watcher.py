@@ -23,7 +23,6 @@ get_reactions_URI          = "https://slack.com/api/reactions.get"
 add_reactions_URI          = "https://slack.com/api/reactions.add"
 post_message_URI           = "https://slack.com/api/chat.postMessage"
 node_map_prefix            = "https://www.nycmesh.net/map/nodes/"
-conversations_replies_URI  = "https://slack.com/api/conversations.replies"
 conversation_history_URI   = "https://slack.com/api/conversations.history"
 http_headers               = {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token}
 
@@ -51,7 +50,7 @@ hub_down_alert_time_ms       = 180000 # how long a hub is observed as down befor
 hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
 hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
 hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
-read_channel_period_m        = 10     # how often the channel is polled for user input
+read_channel_period_m        = 1     # how often the channel is polled for user input
 channel_lookback_m           = read_channel_period_m
 
 
@@ -75,7 +74,7 @@ flap_emoji = ":wackywavinginflatablearmman:"
 
 error_sleep_time_s           = 10     # how long the main loop waits to run again if there's an error
 hub_watcher_mode             = True   # can be disabled for troubleshooting
-root_cause_guesser_timeout_s = 40     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
+root_cause_guesser_timeout_s = 30     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
 use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this py file. will probably make this permanent soon
 
 
@@ -189,9 +188,9 @@ if use_database_persistence == True:
 	# hub_down_tracker = {}
 	# silenced_nodes_cache = []
 
-post_removed_nodes_tracker_thread_ts = None # when user adds or removes nodes, this will post the tracker on the next run
-nodes_to_remove                      = []     # add nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only works in dev
-nodes_to_inject                      = []     # remove nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only works in dev
+post_removed_nodes_tracker_thread_ts = None # when user adds or removes nodes, this will post the tracker on the next run - only used in dev
+nodes_to_remove                      = []     # add nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only used in dev
+nodes_to_inject                      = []     # remove nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only used in dev
 
 
 
@@ -684,10 +683,11 @@ def get_link_subscribers( link_list ):
 
 def post_router_adverts( router_id, thread_ts ):
 	try:
-		body = "   NODE_ID  ADVERTISED_ROUTER  METRIC\n         (for easy copy-paste)\n"
+		body = "*Advertised routers*:\n```NODE_ID  ADVERTISED_ROUTER  METRIC\n"
 		if 'router' in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']:
 			for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']['router']:
-				body += f'sub {router_id} {advertised_router["id"]} {advertised_router["metric"]}\n'
+				body += f'{router_id} {advertised_router["id"]} {advertised_router["metric"]}\n'
+			body += "```"
 	except Exception as e:
 		application_log.error('Error', exc_info=e)
 		body = "router ID not found in live LSDB\ncould be due to down node/router"
@@ -743,20 +743,19 @@ def get_advertised_routers( router_id ):
 
 
 def post_router_info( router_id, thread_ts ):
-	body  = f"\n\n\n\n--------------------------\n"
-	body         += f"-----    FLAP METRICS  \n"
-	body         += f"--------------------------"
-	body += f"\n\n*{router_id}*:{get_router_or_link_flaps( router_id )}"
-	body += f"\n\nNon-WDS Links to {router_id} that have flapped in the past week:\n"
+	body  = f"\n*Flap metrics*:```"
+	body += f"\n{router_id}:{get_router_or_link_flaps( router_id )}"
+	body += f"\nNon-WDS Links to {router_id} that have flapped in the past week:\n"
 	for link_partner in get_link_partners(router_id):
 		link_id = link_partner[0] + "__" + link_partner[1] + "__" + str(link_partner[2])
 		body += f'*{link_id}*{get_router_or_link_flaps(link_id)}'
 	body += f"\n\n{router_id}'s advertised routers in live LSDB as of {dt.datetime.fromtimestamp(current_timestamp_ms/1000).strftime('%Y-%m-%d %H:%M:%S')}:\n"
 	if get_advertised_routers( router_id ):
 		for advertised_router in get_advertised_routers( router_id ):
-			body += f'*{advertised_router["id"]}*:{get_router_or_link_flaps( advertised_router["id"])}'
+			body += f'{advertised_router["id"]}:{get_router_or_link_flaps( advertised_router["id"])}'
 	else:
 		body += f"looks like {router_id} is down currently so no info is available"
+	body += "```"
 	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 
