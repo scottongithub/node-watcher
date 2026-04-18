@@ -44,17 +44,17 @@ def setup_logger(name, log_file, log_level):
 #####################
 
 
-node_down_threshold_ms       = 300000 # how long a node is observed to be down before it goes into alerting state
+node_down_threshold_ms       = 300000  # how long a node is observed to be down before it goes into alerting state
 link_down_threshold_ms       = 300000  # how long a link is observed to be down before it goes into alerting state
-hub_down_alert_time_ms       = 180000 # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
-hub_down_node_qty            = 5      # how many nodes need to go down at once for the event to be treated as 'hub-down'
-hub_down_raise_qty           = 25     # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
-hub_down_report_interval_s   = 60     # if reporting has been enabled by user, for a hub-down event, how often reports (of what nodes are still down) go out
-read_channel_period_m        = 1     # how often the channel is polled for user input
+hub_down_alert_time_ms       = 180000  # how long a hub is observed as down before alerting - in case we want to be more aggressive about hubs
+hub_down_node_qty            = 5       # how many nodes need to go down at once for the event to be treated as 'hub-down'
+hub_down_raise_qty           = 25      # how many nodes need to go down at once for the event to get raised into other systems e.g. send alerts to other channels
+hub_down_report_interval_s   = 60      # if reporting has been enabled by user (by leaving :eyes: on the hub-down message), this is how often reports (of what nodes are still down) go out
+read_channel_period_m        = 1       # how often the channel is polled for user input
 channel_lookback_m           = read_channel_period_m
 
 
-# different reactions can suppress alert message for different times - "suppress_duration_<slack's-name-of-reaction>_s"
+# different reactions that a user leaves can suppress alert messages for different times - "suppress_duration_<slack's-name-of-reaction>_s"
 suppress_duration_DATE_s      = 86400
 suppress_duration_STOPWATCH_s = 10800
 
@@ -62,20 +62,20 @@ suppress_duration_STOPWATCH_s = 10800
 reporting_hour   = 9
 reporting_minute = 0
 
-# how long before a down node is considered abandoned, and so removed from alerting and reporting, until it shows back up in the LSDB
+# how long before a down node is considered abandoned, and so removed from alerting and reporting (until it shows back up in the LSDB)
 abandoned_threshold_ms = 86400 * 1000 * 14 # 2 weeks
 
-# a node is considered to be flappy if it meets or exceeds `flap_time_window_qty` inside of `flap_time_window_hrs`
+# a node is considered to be flappy if it meets, or exceeds `flap_time_window_qty` inside of `flap_time_window_hrs`
 flap_time_window_hrs = 24
-flap_time_window_qty = 12  # any state change, up or down, counts as 1
+flap_time_window_qty = 12      # any state change, up or down, counts as 1
 link_flap_time_window_hrs = 24
-link_flap_time_window_qty = 12
+link_flap_time_window_qty = 12 # any state change, up or down, counts as 1
 flap_emoji = ":wackywavinginflatablearmman:"
 
 error_sleep_time_s           = 10     # how long the main loop waits to run again if there's an error
-hub_watcher_mode             = True   # can be disabled for troubleshooting
-root_cause_guesser_timeout_s = 30     # in case guessing a hub outage's root cause gets hung up, it'll send the alert without indicating root cause node
-use_database_persistence     = True   # persist app state in db - this used to be done by copy-pasting lines from the log into this py file. will probably make this permanent soon
+hub_watcher_mode             = True   # leave on. # TODO make permanent
+root_cause_guesser_timeout_s = 30     # in case guessing a hub outage's root cause gets hung up, it'll give up guessing and send the alert without trying to guess
+use_database_persistence     = True   # leave on # tODO make permanent
 
 
 if environment == "prod":
@@ -157,15 +157,15 @@ db_conn.execute('CREATE TABLE IF NOT EXISTS persistence(variable_name TEXT PRIMA
 conn.commit()
 
 
-# initialize trackers - you can override the db below 
+# initialize trackers - if you need to override the db that goes about 24 lines down from here
 removed_nodes_tracker = {}
 removed_links_tracker = {}
 flappy_nodes_tracker = {}
 hub_down_tracker = {}
 
-# this is only used during hub-down events, to prevent _many_ API calls (to get emojis). 
-# referencing this list is quick and API-free at the small cost of it only knows about
-# nodes that it has looked up previously (during _not_ hub-down events)
+# this cache is only used during hub-down events, to prevent _many_ API calls which grab 
+# reaction data. referencing this list is quick and API-free at the small cost of it only
+# knows about nodes that it has looked up previously (during _not_ hub-down events)
 silenced_nodes_cache = []
 
 if use_database_persistence == True:
@@ -181,16 +181,16 @@ if use_database_persistence == True:
 			application_log.error(f'Variable {variable_name} does not exist in db - maybe this is a fresh setup? Ignore this error if so', exc_info=e)
 			continue
 
-	# Database Override - past states are available in log file for copy-paste
+	# Database Override - past states are available in application log file for copy-paste
 	# removed_nodes_tracker = {}
 	# removed_links_tracker = {}
 	# flappy_nodes_tracker = {}
 	# hub_down_tracker = {}
 	# silenced_nodes_cache = []
 
-post_removed_nodes_tracker_thread_ts = None # when user adds or removes nodes, this will post the tracker on the next run - only used in dev
-nodes_to_remove                      = []     # add nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only used in dev
-nodes_to_inject                      = []     # remove nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD - only used in dev
+post_removed_nodes_tracker_thread_ts = None   # only used in dev - when user adds or removes nodes from cli, this will send them the tracker on the next run 
+nodes_to_remove                      = []     # only used in dev - add nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD
+nodes_to_inject                      = []     # only used in dev - remove nodes, from cli, to removed_nodes_tracker as if they had come in via BIRD 
 
 
 
@@ -242,6 +242,7 @@ def is_silenced( router_id ):
 	thread_exists = thread_exists.fetchall()
 
 	if thread_exists[0][0]:
+		application_log.info(router_id)
 		query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
 		row = db_conn.execute(query, (router_id,))
 		row = row.fetchall()
@@ -282,6 +283,7 @@ def is_silenced( router_id ):
 		response = requests.get(get_reactions_URI, headers=http_headers, params={	"channel": channel, "timestamp": message_ts})
 		json_data = response.json()
 
+		application_log.info(router_id)
 		if "reactions" in json_data["message"]:
 
 			reactions = []
@@ -557,19 +559,6 @@ def get_node_webmap_URI( nodes_to_be_mapped ):
 	return( node_map_URI )
 
 
-# def get_flap_qty( router_id, end_of_window_ms ):
-# 	beginning_of_window = end_of_window_ms - ( flap_time_window_hrs * 3600000 )
-# 	query = 'SELECT COUNT(router_id) from node_state_changes WHERE router_id = ? AND timestamp_ms BETWEEN ? AND ?'
-# 	row = db_conn.execute(query, (router_id, beginning_of_window, end_of_window_ms, ))
-# 	row = row.fetchall()
-# 	return(row[0][0])
-
-
-# def get_link_id( advertising_router, ospf_link_json ):
-# 	link_id = advertising_router + "__" + ospf_link_json["id"] + "__" + str(ospf_link_json["metric"])
-# 	return( link_id )
-
-
 def select_ts( message ):
 	return(messages[message]["ts"])
 
@@ -594,7 +583,7 @@ def get_channel_messages( channel_lookback_m ):
 def is_valid_ip( ip_candidate ):
   ip_regex = r"^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$"
   if(re.search(ip_regex, ip_candidate)): 
-    return(True)
+    return( True )
 
 
 def subscribe_user( sub_dict ):
@@ -687,7 +676,7 @@ def post_router_adverts( router_id, thread_ts ):
 		if 'router' in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']:
 			for advertised_router in deserialized_json_1['areas']['0.0.0.0']['routers'][router_id]['links']['router']:
 				body += f'{router_id} {advertised_router["id"]} {advertised_router["metric"]}\n'
-			body += "```"
+		body += "```"
 	except Exception as e:
 		application_log.error('Error', exc_info=e)
 		body = "router ID not found in live LSDB\ncould be due to down node/router"
@@ -710,12 +699,12 @@ def get_flap_qty( node_or_link_id, end_of_window_ms, window_duration_h ):
 
 def get_router_or_link_flaps( router_or_link_id, days_qty=7, hours_qty=12 ):
 	body =  "\nDAILY\n"
-	for counter in range( 0, days_qty - 1 ):
+	for counter in range( 0, days_qty ):
 		print(counter)
 		print(router_or_link_id)
 		body += str(get_flap_qty( router_or_link_id, current_timestamp_ms - (86400000 * counter), 24 )).ljust(4, " ")
 	body +=	"\nHOURLY\n"
-	for counter in range( 0, hours_qty -1 ):
+	for counter in range( 0, hours_qty ):
 		body += str(get_flap_qty( router_or_link_id, current_timestamp_ms - (3600000 * counter), 1 )).ljust(4, " ")
 	body += "\n\n"
 	return(body)
@@ -759,24 +748,6 @@ def post_router_info( router_id, thread_ts ):
 	response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 
-# def get_flappy_links( end_of_window_ms, window_length_h ):
-# 	# 'CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, advertised_router TEXT, metric INT, state TEXT)'
-# 	beginning_of_window_ms = end_of_window_ms - ( window_length_h * 3600000 )
-# 	query = 'SELECT DISTINCT router_id, advertised_router, metric FROM link_state_changes WHERE timestamp_ms BETWEEN ? AND ?'
-# 	row = db_conn.execute(query, (beginning_of_window_ms, end_of_window_ms, ))
-# 	row = row.fetchall()
-# 	print(row)
-# 	# flappy_links = []
-# 	flappy_links_unfiltered = []
-# 	for link_id in row:
-# 		query = 'SELECT COUNT(router_id) from link_state_changes WHERE router_id = ? AND advertised_router = ? AND metric = ? AND timestamp_ms BETWEEN ? AND ? ORDER BY COUNT(router_id) DESC'
-# 		row = db_conn.execute(query, (link_id[0], link_id[1], link_id[2], beginning_of_window_ms, end_of_window_ms, ))
-# 		row = row.fetchall()
-# 		if row[0][0] >= link_flap_time_window_qty and (link_id[1] + "__" + link_id[0] + "__" + str(link_id[2])) not in flappy_links_unfiltered:
-# 			flappy_links_unfiltered.append( link_id[0] + "__" + link_id[1] + "__" + str(link_id[2]) )			
-# 	return( flappy_links_unfiltered )
-
-
 def get_flappy_nodes( current_timestamp_ms, window_length_h=flap_time_window_hrs ):
 	beginning_of_window = current_timestamp_ms - ( window_length_h * 3600000 )
 	query = 'SELECT router_id, count(*) as counter FROM node_state_changes WHERE timestamp_ms BETWEEN ? AND ? GROUP BY router_id ORDER BY counter DESC'
@@ -808,8 +779,8 @@ def get_router_or_link_flaps_daily( node_or_link_id, days_qty=7 ):
 	else:
 		ljust = 16
 	body = ""
-	body += node_or_link_id.ljust(ljust, " ") +  str(get_flap_qty( node_or_link_id, current_timestamp_ms, 24 )).ljust(5, " ")
-	for counter in range( 1, days_qty ):
+	body += node_or_link_id.ljust(ljust, " ")
+	for counter in range( 0, days_qty ):
 		body += str(get_flap_qty( node_or_link_id, current_timestamp_ms - (86400000 * counter), 24 )).ljust(5, " ")
 	return(body)
 
@@ -884,7 +855,6 @@ while True:
 						nodes_to_inject.remove( node )
 
 
-
 		recently_removed_links = []
 		recently_added_links = []
 
@@ -938,7 +908,7 @@ while True:
 		recently_removed_nodes = nodes_to_remove
 		nodes_to_remove = []
 		if recently_removed_nodes_unfiltered:
-			for router_id in recently_removed_nodes_unfiltered:
+			for router_id in recently_removed_nodes_unfiltered: # get it into db before its filtered so we get everything for future
 				query = 'INSERT into node_state_changes(timestamp_ms, router_id, state) VALUES(?,?, "down")'
 				db_conn.execute(query, (current_timestamp_ms, router_id, ))
 				if ok_to_monitor(router_id):
@@ -949,7 +919,7 @@ while True:
 		flappy_nodes_unfiltered = get_flappy_nodes( current_timestamp_ms )
 		flappy_nodes = []
 		for flappy_node in flappy_nodes_unfiltered:
-			if ok_to_monitor(flappy_node):
+			if ok_to_monitor(flappy_node): # and flappy_node not in silenced_nodes_cache:
 				flappy_nodes.append(flappy_node)
    
 		recently_added_nodes = nodes_to_inject
@@ -1425,74 +1395,75 @@ while True:
 
 		if flappy_nodes:
 			for router_id in flappy_nodes:
-				if is_silenced( router_id ) == False \
-				and router_id not in flappy_nodes_tracker \
+				if router_id not in flappy_nodes_tracker \
 				and (router_id not in removed_nodes_tracker \
 				or (router_id in removed_nodes_tracker \
 				and removed_nodes_tracker[router_id]["alerting"] == False)):
-					# schema: 'CREATE TABLE IF NOT EXISTS slack_threads(node_ip TEXT, thread_ts TEXT)'
-					query = ('SELECT EXISTS(SELECT * FROM slack_threads WHERE node_ip = ?)')
-					thread_exists = db_conn.execute(query, ( router_id,))
-					thread_exists = thread_exists.fetchall()
+				# and router_id not in silenced_nodes_cache:
+					if is_silenced( router_id ) == False:
+						# schema: 'CREATE TABLE IF NOT EXISTS slack_threads(node_ip TEXT, thread_ts TEXT)'
+						query = ('SELECT EXISTS(SELECT * FROM slack_threads WHERE node_ip = ?)')
+						thread_exists = db_conn.execute(query, ( router_id,))
+						thread_exists = thread_exists.fetchall()
 
-					if thread_exists[0][0]:						
-						# Get reactions and update subscribed users before the last alert message is deleted
-						subscribed_users = get_node_subscribers( router_id )
-						application_log.info(f"subscribed users: {str(subscribed_users)}")
+						if thread_exists[0][0]:						
+							# Get reactions and update subscribed users before the last alert message is deleted
+							subscribed_users = get_node_subscribers( router_id )
+							application_log.info(f"subscribed users: {str(subscribed_users)}")
 
-						# Delete previous alert message
-						# The last alert message (in the channel) should always exist if the thread exists, but
-						# this hasn't always been the case, as the clean-up functionality was added after the
-						# app had been running for some time. The check avoids errors from the earlier versions,
-						# and can be eliminated if the App is going into a new Slack channel
-						query = ('SELECT EXISTS(SELECT * FROM alert_messages WHERE node_ip = ?)')
-						last_message_exists = db_conn.execute(query, ( router_id, ))
-						last_message_exists = last_message_exists.fetchall()
-						if last_message_exists[0][0]:
-							query = 'SELECT * FROM alert_messages WHERE node_ip = ?'
+							# Delete previous alert message
+							# The last alert message (in the channel) should always exist if the thread exists, but
+							# this hasn't always been the case, as the clean-up functionality was added after the
+							# app had been running for some time. The check avoids errors from the earlier versions,
+							# and can be eliminated if the App is going into a new Slack channel
+							query = ('SELECT EXISTS(SELECT * FROM alert_messages WHERE node_ip = ?)')
+							last_message_exists = db_conn.execute(query, ( router_id, ))
+							last_message_exists = last_message_exists.fetchall()
+							if last_message_exists[0][0]:
+								query = 'SELECT * FROM alert_messages WHERE node_ip = ?'
+								row = db_conn.execute(query, (router_id, ))
+								row = row.fetchall()
+								thread_ts = row[0][1]
+								response = requests.post(delete_message_URI, headers=http_headers, data=json.dumps({ "channel": channel, "ts": thread_ts}))																												
+								query = 'DELETE FROM alert_messages WHERE node_ip = ?'
+								db_conn.execute(query, (router_id, ))
+
+							# Post message to the node's history thread
+							query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
 							row = db_conn.execute(query, (router_id, ))
 							row = row.fetchall()
 							thread_ts = row[0][1]
-							response = requests.post(delete_message_URI, headers=http_headers, data=json.dumps({ "channel": channel, "ts": thread_ts}))																												
-							query = 'DELETE FROM alert_messages WHERE node_ip = ?'
-							db_conn.execute(query, (router_id, ))
+							body = (flap_emoji + " " + router_id + " has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours")
+							response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
-						# Post message to the node's history thread
-						query = 'SELECT * FROM slack_threads WHERE node_ip = ?'
-						row = db_conn.execute(query, (router_id, ))
-						row = row.fetchall()
-						thread_ts = row[0][1]
-						body = (flap_emoji + " " + router_id + " has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours")
-						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
+							# Get timestamp from the post above - to be added to main channel message as a link
+							json_data = response.json()
+							thread_ts = json_data["message"]["thread_ts"]
+							latest_post_ts = json_data["message"]["ts"]
+							latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
 
-						# Get timestamp from the post above - to be added to main channel message as a link
-						json_data = response.json()
-						thread_ts = json_data["message"]["thread_ts"]
-						latest_post_ts = json_data["message"]["ts"]
-						latest_post_URI = 	thread_URI_prefix + channel + "/p" + latest_post_ts.replace('.', '') + "?thread_ts=" + thread_ts + "&cid=" + channel 
+							# Post message to main channel
+							# application_log.debug(f"{router_id} is silenced: {str(is_silenced(router_id))}")
+							body = (flap_emoji + " " + router_id + " has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours" + " <" + latest_post_URI + "|node history>")
+							for user_id in subscribed_users:
+								body += " <@" + user_id + "> "
+							response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
 
-						# Post message to main channel
-						# application_log.debug(f"{router_id} is silenced: {str(is_silenced(router_id))}")
-						body = (flap_emoji + " " + router_id + " has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours" + " <" + latest_post_URI + "|node history>")
-						for user_id in subscribed_users:
-							body += " <@" + user_id + "> "
-						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel, "unfurl_links": False }))
+							# Get timestamp of main-channel message - to delete it later when a new alert goes out
+							json_data = response.json()
+							thread_ts = json_data["ts"]
+							query = 'INSERT into alert_messages(node_ip, thread_ts) VALUES(?,?)'
+							db_conn.execute(query, (router_id, thread_ts, ))
 
-						# Get timestamp of main-channel message - to delete it later when a new alert goes out
-						json_data = response.json()
-						thread_ts = json_data["ts"]
-						query = 'INSERT into alert_messages(node_ip, thread_ts) VALUES(?,?)'
-						db_conn.execute(query, (router_id, thread_ts, ))
+						else:
+							body = (":thread: *" + router_id + "* has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours")
+							response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
+							json_data = response.json()
+							thread_ts = json_data["ts"]
+							query = 'INSERT into slack_threads(node_ip, thread_ts) VALUES(?,?)'
+							db_conn.execute(query, (router_id, thread_ts, ))
 
-					else:
-						body = (":thread: *" + router_id + "* has flapped " + str(flap_time_window_qty) + " times over the course of " + str(flap_time_window_hrs) + " hours")
-						response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel}))
-						json_data = response.json()
-						thread_ts = json_data["ts"]
-						query = 'INSERT into slack_threads(node_ip, thread_ts) VALUES(?,?)'
-						db_conn.execute(query, (router_id, thread_ts, ))
-
-					flappy_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : True}					
+						flappy_nodes_tracker[router_id] = {"timestamp" : current_timestamp_ms, "alerting" : True}					
 
 
 
@@ -1519,10 +1490,9 @@ while True:
 		#####################################
 
 
-		# if dt.datetime.today().hour == reporting_hour and dt.datetime.today().minute == reporting_minute:
+		if dt.datetime.today().hour == reporting_hour and dt.datetime.today().minute == reporting_minute:
 
-		if dt.datetime.today().minute == reporting_minute:
-		# if True:
+		# if dt.datetime.today().minute == reporting_minute:
 
 			down_report = ""
 			abandoned_nodes = []
@@ -1613,12 +1583,12 @@ while True:
 
 
 
-		################################
-		#####   READ THE CHANNEL   #####
-		################################
+		############################################
+		#####   READ THE CHANNEL AND DO STUFF  #####
+		############################################
 
 
-		if post_removed_nodes_tracker_thread_ts: # the tracker is sent to channel on the following run after user requests to add/remove nodes
+		if post_removed_nodes_tracker_thread_ts: # removed_nodes_tracker is sent to channel on the following run after user requests to add/remove nodes
 			post_removed_nodes_tracker( post_removed_nodes_tracker_thread_ts )
 			post_removed_nodes_tracker_thread_ts = None
 
@@ -1631,17 +1601,22 @@ while True:
 				user_id        = messages[message]["user"]
 				user_text      = messages[message]["text"]
 				user_text_list = user_text.split(" ")
-				if user_text in ["show subscriptions", "Show subscriptions", "show subs", "Show subs"]:
-					input_is_valid = True
-					post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
 
-				elif user_text_list[0] in ["show", "Show"] and user_text_list[1] == "router" and is_valid_ip(user_text_list[2]) and len(user_text_list) == 3:
-					input_is_valid = True
-					post_router_adverts( user_text_list[2], thread_ts )
-					post_router_info( user_text_list[2], thread_ts)
+				if user_text_list[0] not in ["nw", "Nw"]:
+					continue
 
-				elif user_text_list[0] in ["remove", "Remove"] and len(user_text_list) > 1:
-					for ip_candidate in user_text_list[1:]:
+				elif user_text in ["nw show subscriptions", "Nw show subscriptions", "nw show subs", "Nw show subs"]:
+					input_is_valid = True
+					post_subscriptions( get_user_subscriptions( user_id ), thread_ts)
+
+				elif user_text_list[1] == "show" and user_text_list[2] == "router" and is_valid_ip(user_text_list[3]) and len(user_text_list) == 4:
+					input_is_valid = True
+					print("yo")
+					post_router_adverts( user_text_list[3], thread_ts)
+					post_router_info( user_text_list[3], thread_ts)
+
+				elif user_text_list[1] == "remove" and len(user_text_list) > 2:
+					for ip_candidate in user_text_list[2:]:
 						print(ip_candidate)
 						if ip_candidate == user_text_list[-1] and is_valid_ip( ip_candidate ):
 							input_is_valid = True
@@ -1653,8 +1628,8 @@ while True:
 					post_removed_nodes_tracker_thread_ts = thread_ts
 					print(nodes_to_remove)
 
-				elif user_text_list[0] in ["add", "Add"] and len(user_text_list) > 1:
-					for ip_candidate in user_text_list[1:]:
+				elif user_text_list[1] == "add" and len(user_text_list) > 2:
+					for ip_candidate in user_text_list[2:]:
 						if ip_candidate == user_text_list[-1] and is_valid_ip( ip_candidate ):
 							input_is_valid = True
 							nodes_to_inject.append(ip_candidate)
@@ -1664,22 +1639,22 @@ while True:
 							break
 					post_removed_nodes_tracker_thread_ts = thread_ts
 				
-				elif user_text_list[0] in ["subscribe", "Subscribe", "sub", "Sub"]:
-					if is_valid_ip(user_text_list[1]):
+				elif user_text_list[1] in ["subscribe", "sub"]:
+					if is_valid_ip(user_text_list[2]):
 						try:
-							if len(user_text_list) == 2:
+							if len(user_text_list) == 3:
 								input_is_valid = True
-								sub_dict = {"node_ip": user_text_list[1], "advertised_router": "none", "metric": -1, "user_id": user_id}
+								sub_dict = {"node_ip": user_text_list[2], "advertised_router": "none", "metric": -1, "user_id": user_id}
 								subscribe_user( sub_dict )
 								post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
-							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
+							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[3]):
 								input_is_valid = True
-								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
+								sub_dict = {"node_ip": user_text_list[2], "advertised_router": user_text_list[3], "metric": -2, "user_id": user_id}
 								subscribe_user( sub_dict )
 								post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
-							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[2]) and 0 <= int(user_text_list[3]) <= 10000:
+							elif len(user_text_list) == 5 and is_valid_ip(user_text_list[3]) and 0 <= int(user_text_list[4]) <= 10000:
 								input_is_valid = True
-								sub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
+								sub_dict = {"node_ip": user_text_list[2], "advertised_router": user_text_list[3], "metric": int(user_text_list[4]), "user_id": user_id}
 								subscribe_user( sub_dict )
 								post_subscriptions( get_user_subscriptions( user_id), thread_ts )
 						except Exception as e:
@@ -1688,22 +1663,22 @@ while True:
 							pass
 
 
-				elif user_text_list[0] in ["unsubscribe", "unsub"]:
-					if is_valid_ip(user_text_list[1]):
+				elif user_text_list[1] in ["unsubscribe", "unsub"]:
+					if is_valid_ip(user_text_list[2]):
 						try:
-							if len(user_text_list) == 2:
+							if len(user_text_list) == 3:
 								input_is_valid = True
-								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": "none", "metric": -1, "user_id": user_id}
+								unsub_dict = {"node_ip": user_text_list[2], "advertised_router": "none", "metric": -1, "user_id": user_id}
 								unsubscribe_user( unsub_dict )
 								post_subscriptions( get_user_subscriptions( user_id), thread_ts )
-							elif len(user_text_list) == 3 and is_valid_ip(user_text_list[2]):
+							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[3]):
 								input_is_valid = True
-								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": -2, "user_id": user_id}
+								unsub_dict = {"node_ip": user_text_list[2], "advertised_router": user_text_list[3], "metric": -2, "user_id": user_id}
 								unsubscribe_user( unsub_dict )
 								post_subscriptions( get_user_subscriptions( user_id ), thread_ts )
-							elif len(user_text_list) == 4 and is_valid_ip(user_text_list[2]) and 0 <= int(user_text_list[3]) <= 10000:
+							elif len(user_text_list) == 5 and is_valid_ip(user_text_list[3]) and 0 <= int(user_text_list[4]) <= 10000:
 								input_is_valid = True
-								unsub_dict = {"node_ip": user_text_list[1], "advertised_router": user_text_list[2], "metric": int(user_text_list[3]), "user_id": user_id}
+								unsub_dict = {"node_ip": user_text_list[2], "advertised_router": user_text_list[3], "metric": int(user_text_list[4]), "user_id": user_id}
 								unsubscribe_user( unsub_dict )
 								post_subscriptions( get_user_subscriptions( user_id), thread_ts )
 						except Exception as e:
@@ -1713,14 +1688,14 @@ while True:
 
 
 				if not input_is_valid:
-					body = "invalid input bro\noptions are `show subscriptions|subs`, `show router <router id>`, `subscribe|sub <router id>`, `unsubscribe|unsub <router id>`"
+					body = "invalid input\noptions are `nw show subscriptions|subs`, `nw show router <router id>`, `nw subscribe|sub <router id>`, `nw unsubscribe|unsub <router id>`"
 					response = requests.post(post_message_URI, headers=http_headers, data=json.dumps({  "text": body, "channel": channel , "thread_ts": thread_ts}))
 
 
 
-		##################################
-		#####   DUMP TO LOG/STDOUT   #####
-		##################################
+		########################################
+		#####   DUMP STATE TO LOG/STDOUT   #####
+		########################################
 
 
 		print(f"removed_nodes_tracker: {removed_nodes_tracker}\n\nremoved_links_tracker: {removed_links_tracker}\n\nflappy_nodes_tracker: {flappy_nodes_tracker}\n\nhub_down_tracker: {hub_down_tracker}\nsilenced_nodes_cache: {silenced_nodes_cache} \n")
@@ -1738,6 +1713,5 @@ while True:
 	except Exception as e:
 		application_log.error('Error', exc_info=e)
 		application_log.error(a_minute_ago_snapshot_URI)
-		# a potential cause of errors is doing something at the same time that BIRD is, so nudging the time here
-		sleep(error_sleep_time_s)
+		sleep(error_sleep_time_s) # nudge. why not
 		continue

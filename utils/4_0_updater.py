@@ -14,6 +14,10 @@ db_conn.execute('SELECT * from subscriptions WHERE node_ip IS NOT NULL')
 print("\n\nBEFORE")
 for row in db_conn.fetchall():
 	print(row)
+
+db_conn.execute('CREATE TABLE IF NOT EXISTS link_state_changes(timestamp_ms INTEGER, router_id TEXT, advertised_router TEXT, metric INT, state TEXT)')
+db_conn.execute('CREATE INDEX IF NOT EXISTS link_state_changes_index ON node_state_changes(timestamp_ms)')
+
 db_conn.execute('CREATE TABLE IF NOT EXISTS subscriptions_new(node_ip TEXT, advertised_router TEXT, metric INT, subscribers TEXT DEFAULT (json_array()) NOT NULL, UNIQUE(node_ip,advertised_router,metric))')
 db_conn.execute('INSERT INTO subscriptions_new (node_ip, subscribers) SELECT node_ip, subscribers FROM subscriptions')
 db_conn.execute('UPDATE subscriptions_new SET advertised_router = "none" WHERE node_ip NOT NULL')

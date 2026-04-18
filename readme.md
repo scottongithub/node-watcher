@@ -8,9 +8,9 @@ Node-Watcher is a Slack application that monitors and reports the status of node
 
 ### Dependencies
 
-* Needs a Slack app with the following Oauth permissions in all channels it will be posting in: `chat:write`, `reactions:read`
+* Needs a Slack app with the following Oauth permissions in all channels it will be posting in: `chat:write`, `reactions:read`, `reactions:write`, `channels:history`, `groups:history`
 * Python3, using built-in modules 
-* Runs on Linux, tested on Ubuntu Server 24.04
+* Linux
 
 ### Pull and Config
 
@@ -56,6 +56,14 @@ Certain functionalities can be invoked by leaving reactions on the parent of a n
 :date: -> silence all alerts from this node for 24 hours  
 :x: -> silence all alerts from this node forever. remove the :x: to re-enable alerts from this node  
 
+## Controlling the App via CLI
+Leave a message in the channel starting with `nw` (no slash) and the following commands are available:
+`nw show subscriptions|subs`: show your current node/link subscriptions
+`nw subscribe|sub <router id>`: subscribe to node
+`nw subscribe|sub <router id> <advertised_router_id> <metric>`: subscribe to link
+`nw unsubscribe|unsub <router id>`: unsubscribe to node/link
+`nw show router <router id>`: show node's OSPF links to neighbors (can be copy-pasted into nw subscribe afterwards), recent flap history of node, along with history of its links and history of its OSPF neighbors 
+
 ## Hub-down Events
 
 When 5 or more nodes (set by`hub_down_node_qty`) go down, and stay down, past a time threshhold (`hub_down_alert_time_ms`, default 3 min), it's considered a hub-down outage and will look like this:
@@ -78,7 +86,7 @@ If 25 or more nodes (set by`hub_down_raise_qty`) go down at once, an additional 
 Node-Watcher will send out a report every day at a set time (`reporting_hour`, `reporting_minute`) showing which nodes are down and for how long, along with which nodes are flappy and flap quantity over the past 24 hours:
 
 <p align="left">
-<img src="docs/pics/node_down_report.png" />
+<img src="docs/pics/daily_report.png" />
 </p>
 
 Nodes that have been down for more than 14 days (set by `abandoned_threshold_ms`) will be removed from reporting and monitoring, until the node shows back up in the LSDB
